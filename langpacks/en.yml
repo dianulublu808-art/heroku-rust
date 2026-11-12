@@ -1,0 +1,139 @@
+# Heroku Userbot language pack (English)
+# ©️ Heroku Userbot, AGPL-3.0
+
+common:
+  no_args: "🚫 Not enough arguments"
+  who: "🚫 Reply to a user or pass their username/ID"
+  owner_only: "🚫 This command is for the owner only"
+  not_found: "🚫 Not found"
+
+help:
+  title: "🪐 <b>Heroku modules</b>"
+  module: "🪐 <b>{}</b>"
+  command: "▫️ <b>{}</b>"
+  usage: "Usage"
+  no_module: "🚫 Module not found"
+  no_commands: "No commands"
+  commands: "Commands"
+  author: "Author"
+  support: "🪐 <b>Heroku support</b>\n<a href=\"https://t.me/heroku_userbot\">Channel</a> · <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a>"
+  hidden_shown: "👁‍🗨 Hidden: {}\n👁 Shown: {}"
+
+settings:
+  title: "⚙️ <b>Heroku settings</b>"
+  aliases_empty: "▫️ No aliases configured"
+  aliases: "▫️ <b>Aliases</b>"
+  alias_added: "✅ Alias <code>{}</code> → <code>{}</code>"
+  alias_removed: "✅ Alias <code>{}</code> removed"
+  alias_missing: "🚫 Alias not found"
+  alias_args: "🚫 Usage: .addalias <alias> <command> [args]"
+  blacklisted: "✅ Chat <code>{}</code> blacklisted"
+  unblacklisted: "✅ Chat <code>{}</code> unblacklisted"
+  user_blacklisted: "✅ User <code>{}</code> blacklisted"
+  user_unblacklisted: "✅ User <code>{}</code> unblacklisted"
+  what_prefix: "🚫 Specify a prefix"
+  prefix_set: "✅ Prefix set to <code>{}</code>"
+  toggled_off: "🚫 Disabled <code>{}</code>"
+  toggled_on: "✅ Enabled <code>{}</code>"
+  module_not_found: "🚫 Module not found"
+  command_not_found: "🚫 Command not found"
+  cleardb_confirm: "⚠️ Delete the whole database? Run <code>.cleardb --force</code> to confirm."
+  cleardb_done: "✅ Database cleared"
+  restarting: "🔄 Restarting…"
+
+config:
+  title: "⚙️ <b>Configuration of {}</b>"
+  empty: "▫️ This module has no configuration"
+  not_found: "🚫 Configuration key not found"
+  set: "✅ <code>{}</code> = <code>{}</code>"
+  invalid: "🚫 Invalid value"
+
+security:
+  owners: "👑 <b>Owners</b>"
+  sudo: "🔑 <b>Sudo</b>"
+  added: "✅ Added <code>{}</code>"
+  removed: "✅ Removed <code>{}</code>"
+  already: "🚫 Already present"
+  not_present: "🚫 Not present"
+  cannot_remove_self: "🚫 You cannot remove yourself"
+  sgroups: "🛡 <b>Security groups</b>"
+  sgroup_empty: "▫️ Security group <code>{}</code> is empty"
+  sgroup_created: "✅ Security group <code>{}</code> created"
+  sgroup_deleted: "✅ Security group <code>{}</code> deleted"
+  rule_added: "✅ Rule added to <code>{}</code>"
+  tsec_empty: "▫️ No temporary security rules"
+  tsec_cleared: "✅ Temporary security rules cleared"
+  tsec_removed: "✅ Temporary rules removed"
+  masks: "🛡 <b>Permission masks</b>"
+
+backup:
+  creating: "⏳ Creating backup…"
+  created: "✅ Backup created: <code>{}</code>"
+  restoring: "⏳ Restoring backup…"
+  restored: "✅ Database restored"
+  no_file: "🚫 Reply to a JSON backup file"
+  bad_file: "🚫 Invalid backup file"
+  period_set: "✅ Backup period set to {} seconds"
+
+info:
+  title: "🪐 <b>Heroku</b>"
+  version: "▫️ Version: <b>{}</b>"
+  uptime: "▫️ Uptime: <b>{}</b>"
+  owner: "▫️ Owner: <b>{}</b>"
+  modules: "▫️ Modules: <b>{}</b>"
+  python: "▫️ Engine: <b>Rust</b>"
+  platform: "▫️ Platform: <b>{}</b>"
+  user: "▫️ User: <b>{}</b>"
+
+translations:
+  current: "🌐 Current language: <b>{}</b>"
+  available: "🌐 Available: <b>{}</b>"
+  set: "✅ Language set to <b>{}</b>"
+  unknown: "🚫 Unknown language"
+
+translate:
+  usage: "🚫 Usage: .tr <text> or reply to a message"
+  result: "🌐 <b>Translation:</b>\n{}"
+  error: "🚫 Translation failed: {}"
+
+test:
+  pong: "🏓 <b>Pong!</b>\n▫️ Latency: <b>{}</b> ms"
+  logs_cleared: "🧹 Logs cleared"
+  suspended: "⏸ Command execution suspended"
+  resumed: "▶️ Command execution resumed"
+
+terminal:
+  usage: "🚫 Usage: .terminal <command>"
+  result: "💻 <b>Terminal</b>\n<pre><code class=\"language-bash\">{}</code></pre>"
+
+eval:
+  usage: "🚫 Usage: .e <expression>"
+  result: "💻 <b>Result</b>\n<pre><code>{}</code></pre>"
+  error: "🚫 <b>Evaluation error</b>\n<pre><code>{}</code></pre>"
+
+updater:
+  up_to_date: "✅ You are running the latest version"
+  restarting: "🔄 Restart requested. Run the bot again to apply changes"
+  source: "🌐 Source: <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a>"
+  manual: "🚫 Self-update is not available in the Rust build. Update the binary manually."
+
+loader:
+  unavailable: "🚫 Dynamic Python module loading is not available in the Rust build"
+  list: "📦 <b>Modules</b>\n{}"
+  loaded: "✅ Module loaded"
+  unloaded: "✅ Module unloaded"
+
+inline:
+  unavailable: "🚫 Inline mode is not implemented in the Rust build yet"
+
+web:
+  unavailable: "🚫 The web panel is not implemented in the Rust build yet"
+
+stub:
+  inline: "🚫 Inline mode is not implemented in the Rust build yet"
+  web: "🚫 The web panel is not implemented in the Rust build yet"
+  accounts: "🚫 Multi-account switching is not implemented in the Rust build yet"
+  restrictor: "🚫 The module restrictor is not implemented in the Rust build yet"
+
+quickstart:
+  text: "👋 <b>Welcome to Heroku!</b>\n\nType <code>.help</code> to see the available commands. You are the owner, so every command is available to you."

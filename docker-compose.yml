@@ -1,0 +1,22 @@
+services:
+  worker:
+    container_name: heroku_ub
+    build:
+      context: .
+    environment:
+      HEROKU_DATA_ROOT: /data
+      TG_API_ID: ${TG_API_ID:-}
+      TG_API_HASH: ${TG_API_HASH:-}
+      TG_PHONE: ${TG_PHONE:-}
+      HEROKU_LANG: ${HEROKU_LANG:-en}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - worker:/data
+    stop_signal: SIGINT
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    init: true
+
+volumes:
+  worker:

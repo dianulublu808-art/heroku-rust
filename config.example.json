@@ -1,0 +1,12 @@
+{
+  "api_id": 0,
+  "api_hash": "",
+  "phone": "+10000000000",
+  "lang": "en",
+  "log_level": "info",
+  "session_name": "heroku",
+  "inline_bot_token": null,
+  "inline_bot_username": null,
+  "proxy": null,
+  "web": null
+}

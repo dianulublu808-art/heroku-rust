@@ -1,0 +1,139 @@
+# Языковой пакет Heroku Userbot (Русский)
+# ©️ Heroku Userbot, AGPL-3.0
+
+common:
+  no_args: "🚫 Недостаточно аргументов"
+  who: "🚫 Ответьте на пользователя или укажите его username/ID"
+  owner_only: "🚫 Эта команда доступна только владельцу"
+  not_found: "🚫 Не найдено"
+
+help:
+  title: "🪐 <b>Модули Heroku</b>"
+  module: "🪐 <b>{}</b>"
+  command: "▫️ <b>{}</b>"
+  usage: "Использование"
+  no_module: "🚫 Модуль не найден"
+  no_commands: "Нет команд"
+  commands: "Команды"
+  author: "Автор"
+  support: "🪐 <b>Поддержка Heroku</b>\n<a href=\"https://t.me/heroku_userbot\">Канал</a> · <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a>"
+  hidden_shown: "👁‍🗨 Скрыто: {}\n👁 Показано: {}"
+
+settings:
+  title: "⚙️ <b>Настройки Heroku</b>"
+  aliases_empty: "▫️ Алиасы не настроены"
+  aliases: "▫️ <b>Алиасы</b>"
+  alias_added: "✅ Алиас <code>{}</code> → <code>{}</code>"
+  alias_removed: "✅ Алиас <code>{}</code> удалён"
+  alias_missing: "🚫 Алиас не найден"
+  alias_args: "🚫 Использование: .addalias <алиас> <команда> [аргументы]"
+  blacklisted: "✅ Чат <code>{}</code> добавлен в чёрный список"
+  unblacklisted: "✅ Чат <code>{}</code> убран из чёрного списка"
+  user_blacklisted: "✅ Пользователь <code>{}</code> заблокирован"
+  user_unblacklisted: "✅ Пользователь <code>{}</code> разблокирован"
+  what_prefix: "🚫 Укажите префикс"
+  prefix_set: "✅ Префикс изменён на <code>{}</code>"
+  toggled_off: "🚫 Отключено <code>{}</code>"
+  toggled_on: "✅ Включено <code>{}</code>"
+  module_not_found: "🚫 Модуль не найден"
+  command_not_found: "🚫 Команда не найдена"
+  cleardb_confirm: "⚠️ Удалить всю базу данных? Выполните <code>.cleardb --force</code> для подтверждения."
+  cleardb_done: "✅ База данных очищена"
+  restarting: "🔄 Перезапуск…"
+
+config:
+  title: "⚙️ <b>Настройки модуля {}</b>"
+  empty: "▫️ У этого модуля нет настроек"
+  not_found: "🚫 Ключ настроек не найден"
+  set: "✅ <code>{}</code> = <code>{}</code>"
+  invalid: "🚫 Некорректное значение"
+
+security:
+  owners: "👑 <b>Владельцы</b>"
+  sudo: "🔑 <b>Права sudo</b>"
+  added: "✅ Добавлен <code>{}</code>"
+  removed: "✅ Удалён <code>{}</code>"
+  already: "🚫 Уже добавлен"
+  not_present: "🚫 Отсутствует"
+  cannot_remove_self: "🚫 Нельзя удалить себя"
+  sgroups: "🛡 <b>Группы безопасности</b>"
+  sgroup_empty: "▫️ Группа безопасности <code>{}</code> пуста"
+  sgroup_created: "✅ Группа безопасности <code>{}</code> создана"
+  sgroup_deleted: "✅ Группа безопасности <code>{}</code> удалена"
+  rule_added: "✅ Правило добавлено в <code>{}</code>"
+  tsec_empty: "▫️ Временных правил нет"
+  tsec_cleared: "✅ Временные правила очищены"
+  tsec_removed: "✅ Временные правила удалены"
+  masks: "🛡 <b>Маски прав</b>"
+
+backup:
+  creating: "⏳ Создаю резервную копию…"
+  created: "✅ Резервная копия создана: <code>{}</code>"
+  restoring: "⏳ Восстанавливаю резервную копию…"
+  restored: "✅ База данных восстановлена"
+  no_file: "🚫 Ответьте на JSON-файл резервной копии"
+  bad_file: "🚫 Некорректный файл резервной копии"
+  period_set: "✅ Период резервного копирования: {} секунд"
+
+info:
+  title: "🪐 <b>Heroku</b>"
+  version: "▫️ Версия: <b>{}</b>"
+  uptime: "▫️ Аптайм: <b>{}</b>"
+  owner: "▫️ Владелец: <b>{}</b>"
+  modules: "▫️ Модули: <b>{}</b>"
+  python: "▫️ Движок: <b>Rust</b>"
+  platform: "▫️ Платформа: <b>{}</b>"
+  user: "▫️ Пользователь: <b>{}</b>"
+
+translations:
+  current: "🌐 Текущий язык: <b>{}</b>"
+  available: "🌐 Доступные: <b>{}</b>"
+  set: "✅ Язык изменён на <b>{}</b>"
+  unknown: "🚫 Неизвестный язык"
+
+translate:
+  usage: "🚫 Использование: .tr <текст> или ответ на сообщение"
+  result: "🌐 <b>Перевод:</b>\n{}"
+  error: "🚫 Ошибка перевода: {}"
+
+test:
+  pong: "🏓 <b>Понг!</b>\n▫️ Задержка: <b>{}</b> мс"
+  logs_cleared: "🧹 Логи очищены"
+  suspended: "⏸ Выполнение команд приостановлено"
+  resumed: "▶️ Выполнение команд возобновлено"
+
+terminal:
+  usage: "🚫 Использование: .terminal <команда>"
+  result: "💻 <b>Терминал</b>\n<pre><code class=\"language-bash\">{}</code></pre>"
+
+eval:
+  usage: "🚫 Использование: .e <выражение>"
+  result: "💻 <b>Результат</b>\n<pre><code>{}</code></pre>"
+  error: "🚫 <b>Ошибка вычисления</b>\n<pre><code>{}</code></pre>"
+
+updater:
+  up_to_date: "✅ Установлена последняя версия"
+  restarting: "🔄 Запрошен перезапуск. Запустите бота снова"
+  source: "🌐 Исходники: <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a>"
+  manual: "🚫 Самообновление недоступно в Rust-сборке. Обновите бинарник вручную."
+
+loader:
+  unavailable: "🚫 Динамическая загрузка Python-модулей недоступна в Rust-сборке"
+  list: "📦 <b>Модули</b>\n{}"
+  loaded: "✅ Модуль загружен"
+  unloaded: "✅ Модуль выгружен"
+
+inline:
+  unavailable: "🚫 Инлайн-режим пока не реализован в Rust-сборке"
+
+web:
+  unavailable: "🚫 Веб-панель пока не реализована в Rust-сборке"
+
+stub:
+  inline: "🚫 Инлайн-режим пока не реализован в Rust-сборке"
+  web: "🚫 Веб-панель пока не реализована в Rust-сборке"
+  accounts: "🚫 Переключение аккаунтов пока не реализовано в Rust-сборке"
+  restrictor: "🚫 Ограничитель модулей пока не реализован в Rust-сборке"
+
+quickstart:
+  text: "👋 <b>Добро пожаловать в Heroku!</b>\n\nВведите <code>.help</code>, чтобы увидеть доступные команды. Вы владелец, поэтому вам доступны все команды."

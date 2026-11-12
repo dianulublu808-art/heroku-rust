@@ -1,0 +1,9 @@
+/target
+/config.json
+/heroku.json
+/sessions/
+/backups/
+/plugins/
+*.session
+*.log
+.env
