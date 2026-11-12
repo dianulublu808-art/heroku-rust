@@ -3,6 +3,11 @@
 
 //! Heroku Userbot — Telegram MTProto userbot written in Rust.
 
+// Some helpers (formatting, peer helpers, security lists) are part of the
+// module-facing API and are used by optional modules or upcoming features.
+// Keep them compiled without flooding the build with dead-code warnings.
+#![allow(dead_code)]
+
 mod args;
 mod config;
 mod ctx;

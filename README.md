@@ -123,7 +123,7 @@ Run `.help` for the live list. Highlights:
 | Modules | `.togglemod`, `.togglecmd`, `.clearmodule`, `.blacklist`, `.unblacklist` |
 | Security | `.owneradd`, `.ownerrm`, `.ownerlist`, `.newsgroup`, `.sgroupadd`, `.sgrouprule`, `.security`, `.tsec` |
 | Backups | `.backupdb`, `.restoredb`, `.backupall`, `.restoreall`, `.set_backup_period` |
-| Tools | `.terminal`, `.e` / `.eval`, `.tr`, `.tr`, `.setlang` |
+| Tools | `.terminal`, `.e` / `.eval`, `.tr`, `.setlang`, `.dllangpack` |
 | Updates | `.update`, `.restart`, `.autoupdate`, `.source`, `.changelog` |
 | Loader stubs | `.loadmod`, `.unloadmod`, `.listmods`, `.modinfo` (static build) |
 

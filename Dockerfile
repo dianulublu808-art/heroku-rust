@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y pkg-config libsqlite3-dev \
@@ -9,7 +9,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 COPY langpacks ./langpacks
-RUN cargo build --release --locked 2>/dev/null || cargo build --release
+RUN cargo build --release
 
 # Runtime stage
 FROM debian:bookworm-slim

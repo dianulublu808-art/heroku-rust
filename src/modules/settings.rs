@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::args::Args;
 use crate::ctx::Ctx;
-use crate::module::{CommandDef, Module, ModuleFactory};
+use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
 use crate::tg::{escape_html, Msg};
 
 pub struct CoreMod;
@@ -46,6 +46,35 @@ impl Module for CoreMod {
             CommandDef::new("togglemod", "Enable or disable a module").usage("<module>"),
             CommandDef::new("clearmodule", "Remove all data of a module").usage("<module>"),
             CommandDef::new("installation", "Installation guide"),
+        ]
+    }
+
+    fn config_spec(&self) -> Vec<ConfigSpec> {
+        vec![
+            ConfigSpec::new(
+                "allow_nonstandart_prefixes",
+                "Allow prefixes that are not punctuation characters",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "alias_emoji",
+                "Emoji shown next to aliases in listings",
+                ConfigDefault::Text("▪️"),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "rich_mode",
+                "Use rich formatting where the client supports it",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "keep_message_state",
+                "Remember message state for reaction handling",
+                ConfigDefault::Bool(true),
+                ConfigKind::Bool,
+            ),
         ]
     }
 
