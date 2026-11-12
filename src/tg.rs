@@ -102,11 +102,10 @@ impl Msg {
     }
 
     pub async fn sender_ref(&self) -> Result<Option<PeerRef>> {
-        Ok(self
-            .inner
+        self.inner
             .sender_ref()
             .await
-            .map_err(|err| anyhow::anyhow!("{err}"))?)
+            .map_err(|err| anyhow::anyhow!("{err}"))
     }
 
     pub fn peer(&self) -> Option<&Peer> {

@@ -441,9 +441,7 @@ impl HerokuSecurityMod {
 
         if !matches!(rule_type, "command" | "module") {
             message
-                .reply_html(format!(
-                    "🚫 Rule type must be <code>command</code> or <code>module</code>"
-                ))
+                .reply_html("🚫 Rule type must be <code>command</code> or <code>module</code>")
                 .await?;
             return Ok(());
         }

@@ -295,11 +295,11 @@ pub fn wipe(data_root: &Path) -> Result<()> {
     for entry in fs::read_dir(data_root)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("config") || name.ends_with(".session") || name == "heroku.json" {
-            if entry.path().is_file() {
-                fs::remove_file(entry.path())?;
-                removed += 1;
-            }
+        if (name.starts_with("config") || name.ends_with(".session") || name == "heroku.json")
+            && entry.path().is_file()
+        {
+            fs::remove_file(entry.path())?;
+            removed += 1;
         }
     }
     for dir in ["sessions", "backups", "plugins"] {

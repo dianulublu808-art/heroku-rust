@@ -135,6 +135,8 @@ impl Security {
             || self.rule_matches("tsec_chat", user_id, chat_id, module, command, now, false)
     }
 
+    // The rule lookup mirrors Heroku's matcher and needs all four selectors.
+    #[allow(clippy::too_many_arguments)]
     fn rule_matches(
         &self,
         which: &str,

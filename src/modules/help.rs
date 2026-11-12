@@ -109,8 +109,8 @@ impl Help {
             for command in commands {
                 body.push_str(&format!(
                     "{} <code>.{}</code>",
-                    ctx.tf("help.command", &[&escape_html(&command.name)]),
-                    escape_html(&command.usage)
+                    ctx.tf("help.command", &[&escape_html(command.name)]),
+                    escape_html(command.usage)
                 ));
                 if !command.usage.is_empty() {
                     body.push_str(&format!(" <code>{}</code>", escape_html(command.usage)));
@@ -142,8 +142,8 @@ impl Help {
             };
             let mut text = format!(
                 "{}\n<i>{}</i>\n\n▫️ {}: <code>{}</code>\n▫️ <i>{}</i>",
-                ctx.tf("help.command", &[&escape_html(&command.name)]),
-                escape_html(&module.name()),
+                ctx.tf("help.command", &[&escape_html(command.name)]),
+                escape_html(module.name()),
                 ctx.tr("help.usage"),
                 escape_html(&usage),
                 escape_html(command.description)

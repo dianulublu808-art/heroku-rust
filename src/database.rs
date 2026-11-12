@@ -37,6 +37,8 @@ impl Database {
         }
 
         // Migrate old Hikka/GeekTG namespaces, exactly like the Python version did.
+        // If both the old and the new namespace exist, merge their keys instead of
+        // letting the last migration overwrite the earlier one.
         for (old, new) in [("hikka.", "heroku."), ("legacy.", "heroku.")] {
             let keys: Vec<String> = map
                 .keys()
@@ -44,8 +46,19 @@ impl Database {
                 .cloned()
                 .collect();
             for key in keys {
-                if let Some(value) = map.remove(&key) {
-                    map.insert(key.replacen(old, new, 1), value);
+                let Some(value) = map.remove(&key) else {
+                    continue;
+                };
+                let target = key.replacen(old, new, 1);
+                match (map.get_mut(&target), value) {
+                    (Some(Value::Object(existing)), Value::Object(incoming)) => {
+                        for (name, item) in incoming {
+                            existing.entry(name).or_insert(item);
+                        }
+                    }
+                    (_, value) => {
+                        map.insert(target, value);
+                    }
                 }
             }
         }

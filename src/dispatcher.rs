@@ -197,7 +197,6 @@ impl Dispatcher {
             && text.chars().count() > prefix.chars().count() * 2
         {
             let candidate = text[prefix.len() * 2..]
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or_default()
@@ -209,7 +208,8 @@ impl Dispatcher {
                 let stripped = text[prefix.len()..].to_owned();
                 let _ = message
                     .inner
-                    .edit(grammers_client::message::InputMessage::new().text(stripped));
+                    .edit(grammers_client::message::InputMessage::new().text(stripped))
+                    .await;
                 return None;
             }
         }
