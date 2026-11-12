@@ -9,15 +9,24 @@ common:
 
 help:
   title: "🪐 <b>Модули Heroku</b>"
+  subtitle: "⚡ Rust-версия · v{}"
   module: "🪐 <b>{}</b>"
+  module_label: "Модуль"
   command: "▫️ <b>{}</b>"
   usage: "Использование"
+  aliases: "Алиасы"
   no_module: "🚫 Модуль не найден"
   no_commands: "Нет команд"
   commands: "Команды"
   author: "Автор"
   support: "🪐 <b>Поддержка Heroku</b>\n<a href=\"https://t.me/heroku_userbot\">Канал</a> · <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a>"
   hidden_shown: "👁‍🗨 Скрыто: {}\n👁 Показано: {}"
+  view_hint: "▫️ <code>{}</code> — описание модуля или команды"
+  suggestions: "🔎 <b>Возможно, вы искали:</b>\n{}"
+
+errors:
+  command_failed: "🚫 <b>Команда</b> <code>{}</code> <b>завершилась ошибкой</b>"
+  error: "🧾 <b>Ошибка</b>"
 
 settings:
   title: "⚙️ <b>Настройки Heroku</b>"
@@ -77,13 +86,16 @@ backup:
 
 info:
   title: "🪐 <b>Heroku</b>"
+  subtitle: "⚡ Rust-версия · AGPL-3.0"
   version: "▫️ Версия: <b>{}</b>"
   uptime: "▫️ Аптайм: <b>{}</b>"
   owner: "▫️ Владелец: <b>{}</b>"
   modules: "▫️ Модули: <b>{}</b>"
+  prefix: "▫️ Префикс: <b>{}</b>"
   python: "▫️ Движок: <b>Rust</b>"
   platform: "▫️ Платформа: <b>{}</b>"
-  user: "▫️ Пользователь: <b>{}</b>"
+  user: "▫️ Аккаунт: <b>{}</b>"
+  links: "🌐 <a href=\"https://github.com/dianulublu808-art/heroku-rust\">GitHub</a> · <a href=\"https://t.me/heroku_userbot\">Канал</a>"
 
 translations:
   current: "🌐 Текущий язык: <b>{}</b>"
@@ -98,7 +110,17 @@ translate:
 
 test:
   pong: "🏓 <b>Понг!</b>\n▫️ Задержка: <b>{}</b> мс"
+  logs_title: "🧾 <b>Логи</b> <i>({}/{})</i>"
   logs_cleared: "🧹 Логи очищены"
+  ids_title: "🆔 <b>Идентификаторы</b>"
+  id_user: "▫️ Пользователь: <code>{}</code>"
+  id_chat: "▫️ Чат: <code>{}</code>"
+  id_message: "▫️ Сообщение: <code>{}</code>"
+  id_type: "▫️ Тип: {}"
+  type_private: "личный чат"
+  type_channel: "канал"
+  type_group: "группа"
+  suspended_for: "⏸ <b>Пауза на {} с</b>"
   suspended: "⏸ Выполнение команд приостановлено"
   resumed: "▶️ Выполнение команд возобновлено"
 

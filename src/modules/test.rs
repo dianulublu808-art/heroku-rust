@@ -29,6 +29,7 @@ impl Module for TestMod {
     fn commands(&self) -> Vec<CommandDef> {
         vec![
             CommandDef::new("ping", "Measure the userbot latency"),
+            CommandDef::new("id", "Show user, chat and message identifiers"),
             CommandDef::new("logs", "Show recent logs").usage("[count]"),
             CommandDef::new("clearlogs", "Clear the log buffer"),
             CommandDef::new("suspend", "Pause command handling").usage("<seconds>"),
@@ -51,6 +52,29 @@ impl Module for TestMod {
                     .edit_html(ctx.tf("test.pong", &[&latency.to_string()]))
                     .await?;
             }
+            "id" => {
+                let sender = message
+                    .sender_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let kind = if message.is_private() {
+                    ctx.tr("test.type_private")
+                } else if message.is_channel() {
+                    ctx.tr("test.type_channel")
+                } else {
+                    ctx.tr("test.type_group")
+                };
+                message
+                    .reply_html(format!(
+                        "{title}\n{user}\n{chat}\n{message_id}\n{kind}",
+                        title = ctx.tr("test.ids_title"),
+                        user = ctx.tf("test.id_user", &[&sender]),
+                        chat = ctx.tf("test.id_chat", &[&message.chat_id().to_string()]),
+                        message_id = ctx.tf("test.id_message", &[&message.id().to_string()]),
+                        kind = ctx.tf("test.id_type", &[&kind]),
+                    ))
+                    .await?;
+            }
             "logs" => {
                 let count = args
                     .get(0)
@@ -61,9 +85,11 @@ impl Module for TestMod {
                 let body = escape_html(&lines.join("\n"));
                 message
                     .reply_html(format!(
-                        "🧾 <b>Logs</b> <i>({}/{})</i>\n<pre><code class=\"language-logs\">{body}</code></pre>",
-                        lines.len(),
-                        count
+                        "{title}\n<pre><code class=\"language-logs\">{body}</code></pre>",
+                        title = ctx.tf(
+                            "test.logs_title",
+                            &[&lines.len().to_string(), &count.to_string()]
+                        )
                     ))
                     .await?;
             }
@@ -78,7 +104,7 @@ impl Module for TestMod {
                     .unwrap_or(0.0)
                     .clamp(0.0, 3600.0);
                 message
-                    .reply_html(format!("⏸ <b>Suspended for {seconds:.1}s</b>"))
+                    .reply_html(ctx.tf("test.suspended_for", &[&format!("{seconds:.1}")]))
                     .await?;
                 tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
                 message.reply_html(ctx.tr("test.resumed")).await?;

@@ -20,7 +20,8 @@ runtime module loader.
 - MTProto client built on [`grammers`](https://github.com/Lonami/grammers) 0.12
   (`Client`, `SenderPool`, SQLite session storage).
 - First-run wizard, environment-variable overrides and an interactive login
-  (including 2FA).
+  (including 2FA, delivery hints, `resend`, code retries and `TG_CODE` for
+  automated starts).
 - JSON database in the original `owner → key → value` shape, so an existing
   `heroku.json` can be reused.
 - Command prefixes, personal prefixes, aliases, `| grep`, `@username` / `@me`
@@ -53,6 +54,18 @@ cargo build --release
 The binary is completely self-contained. Copy it to a server, put it in a
 directory with your data, and run it.
 
+### Termux (Android)
+
+```bash
+pkg install rust clang pkg-config libsqlite
+cd ~/heroku-rust
+cargo build --release
+./target/release/heroku --data-root "$PWD/data"
+```
+
+Keep the session file private: anyone with `data/sessions/*.session` can use the
+account.
+
 ## Configuration
 
 On first start the bot asks for `api_id`, `api_hash` and a phone number and
@@ -76,9 +89,42 @@ Environment variables take priority over the file:
 | `TG_API_ID` | Telegram `api_id` |
 | `TG_API_HASH` | Telegram `api_hash` |
 | `TG_PHONE` | Phone number used for login |
+| `TG_CODE` | One-shot login code (for non-interactive/automated starts) |
+| `TG_2FA_PASSWORD` | Two-factor password (used once, then the prompt falls back to stdin) |
 | `HEROKU_LANG` | Interface language (`en`, `ru`) |
 | `LOG_LEVEL` | `trace`, `debug`, `info`, `warn`, `error` |
 | `HEROKU_DATA_ROOT` | Data directory (same as `--data-root`) |
+
+### First login
+
+The wizard asks for `api_id`, `api_hash` and a phone number, then requests a
+code. The bot prints **where** Telegram sent it:
+
+- **Telegram app** — open the “Telegram” service chat (`777000`) on any device
+  already signed in to this account. This is the usual channel for numbers that
+  have an active Telegram session.
+- **SMS** — can take a minute or two, and some carriers delay or drop Telegram
+  messages.
+- **Call / flash call / e-mail** — follow the printed instruction.
+
+At the code prompt:
+
+| Input | Effect |
+| --- | --- |
+| `12345` | Try to sign in |
+| `resend` | Request a new code without restarting the bot |
+| empty line | Ignore and ask again |
+
+A wrong code can be retried up to three times; an expired code automatically
+requests a new one. If 2FA is enabled, the password prompt shows the hint from
+Telegram and allows three attempts.
+
+The phone number may be entered as `+79001234567`, `0079001234567` or
+`89001234567` (the last form is normalised to `+7…`). The wizard also asks for
+the interface language; it can be changed later with `.setlang ru`.
+
+If Telegram reports `FLOOD_WAIT`, wait the printed number of seconds before
+requesting another code. Repeated restarts do not speed this up.
 
 ### Data directory
 
@@ -118,7 +164,7 @@ Run `.help` for the live list. Highlights:
 
 | Area | Commands |
 | --- | --- |
-| Core | `.help`, `.support`, `.heroku`, `.info`, `.settings`, `.ping`, `.logs` |
+| Core | `.help`, `.support`, `.heroku`, `.info`, `.settings`, `.ping`, `.id`, `.logs` |
 | Config | `.config`, `.setprefix`, `.aliases`, `.addalias`, `.delalias` |
 | Modules | `.togglemod`, `.togglecmd`, `.clearmodule`, `.blacklist`, `.unblacklist` |
 | Security | `.owneradd`, `.ownerrm`, `.ownerlist`, `.newsgroup`, `.sgroupadd`, `.sgrouprule`, `.security`, `.tsec` |
@@ -138,7 +184,7 @@ Run `.help` for the live list. Highlights:
 | `HerokuSettingsMod` | `settings`, `watchers`, `nonick*` | Global switches |
 | `HerokuBackupMod` | `backupdb`, `restoredb`, `set_backup_period` | Automatic backups |
 | `HerokuInfoMod` | `info`, `ubinfo` | Version, uptime, platform |
-| `TestMod` | `ping`, `logs`, `clearlogs`, `suspend` | Self-testing |
+| `TestMod` | `ping`, `id`, `logs`, `clearlogs`, `suspend` | Self-testing |
 | `Translations` | `setlang`, `dllangpack` | Language packs |
 | `Translator` | `tr` | Google Translate backend |
 | `TerminalMod` | `terminal`, `terminate` | Shell with dangerous-command guard, 120 s timeout |
@@ -155,8 +201,9 @@ Run `.help` for the live list. Highlights:
 
 ```text
 src/
-  main.rs         entry point, login, update loop, shutdown
+  main.rs         entry point, banner, update loop, shutdown
   config.rs       config file, wizard, CLI, data layout
+  login.rs        interactive login: delivery hints, resend, retries, 2FA
   database.rs     thread-safe JSON database
   dispatcher.rs   prefix parsing, permissions, rate limit, watchers
   module.rs       Module trait, CommandDef, inventory-based registry

@@ -376,17 +376,15 @@ impl Dispatcher {
         let name = command.name;
         if let Err(err) = module.handle(ctx, name, &message, &args).await {
             tracing::error!("Command .{name} failed: {err:#}");
+            let header = ctx.tf("errors.command_failed", &[&escape_html(message.text())]);
             let text = if ctx.db.get_bool("heroku.main", "inlinelogs", true) {
                 format!(
-                    "🚫 <b>Call</b> <code>{}</code> <b>failed!</b>\n\n<b>🧾 Error:</b>\n<pre><code class=\"language-logs\">{}</code></pre>",
-                    escape_html(message.text()),
-                    escape_html(&format!("{err:#}"))
+                    "{header}\n\n{label}\n<pre><code class=\"language-logs\">{}</code></pre>",
+                    escape_html(&format!("{err:#}")),
+                    label = ctx.tr("errors.error")
                 )
             } else {
-                format!(
-                    "🚫 <b>Call</b> <code>{}</code> <b>failed!</b>",
-                    escape_html(message.text())
-                )
+                header
             };
             let _ = message.reply_html(text).await;
         }

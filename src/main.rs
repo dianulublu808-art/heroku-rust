@@ -14,6 +14,7 @@ mod ctx;
 mod database;
 mod dispatcher;
 mod logbuf;
+mod login;
 mod module;
 mod modules;
 mod security;
@@ -22,9 +23,9 @@ mod translations;
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use grammers_client::update::Update;
-use grammers_client::{Client, SignInError};
+use grammers_client::Client;
 use grammers_mtsender::{SenderPool, UpdatesConfiguration};
 use grammers_session::storages::{erase, SqliteSession};
 use tokio::task::JoinSet;
@@ -54,6 +55,8 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
+    print_banner(&data_root);
+
     let config = Config::load_or_setup(&data_root)?;
     let log_buffer = LogBuffer::default();
     init_tracing(&config, log_buffer.clone());
@@ -73,6 +76,14 @@ async fn async_main() -> Result<()> {
             .await
             .context("failed to open session database")?,
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            Config::session_path(&data_root),
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
     let session_view = erase(session.clone());
 
     let SenderPool {
@@ -84,7 +95,7 @@ async fn async_main() -> Result<()> {
     let pool_task = tokio::spawn(runner.run());
 
     if !client.is_authorized().await? {
-        login(&client, &config).await?;
+        login::interactive_login(&client, &session_view, &config).await?;
     }
 
     let me = client.get_me().await.context("failed to fetch self user")?;
@@ -206,6 +217,28 @@ async fn async_main() -> Result<()> {
     Ok(())
 }
 
+fn print_banner(data_root: &std::path::Path) {
+    use std::io::IsTerminal;
+
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+
+    const PURPLE: &str = "\x1b[38;2;165;110;245m";
+    const DIM: &str = "\x1b[2m";
+    const BOLD: &str = "\x1b[1m";
+    const RESET: &str = "\x1b[0m";
+
+    println!();
+    println!(
+        "{PURPLE}{BOLD}  🪐  HEROKU{RESET} {DIM}v{}{RESET}",
+        config::VERSION
+    );
+    println!("{DIM}      Telegram userbot · Rust edition{RESET}");
+    println!("{DIM}      data: {}{RESET}", data_root.display());
+    println!();
+}
+
 fn init_tracing(config: &Config, log_buffer: LogBuffer) {
     let filter = EnvFilter::try_new(&config.log_level)
         .or_else(|_| EnvFilter::try_new("info"))
@@ -215,52 +248,6 @@ fn init_tracing(config: &Config, log_buffer: LogBuffer) {
         .with_target(false)
         .with_writer(TeeMaker(log_buffer))
         .try_init();
-}
-
-async fn login(client: &Client, config: &Config) -> Result<()> {
-    let phone = match config.phone.clone() {
-        Some(phone) if !phone.trim().is_empty() => phone,
-        _ => {
-            let phone = config::prompt("Enter your phone number in international format (+...): ")?;
-            if phone.is_empty() {
-                bail!("a phone number is required to log in");
-            }
-            phone
-        }
-    };
-
-    let token = client
-        .request_login_code(&phone, &config.api_hash)
-        .await
-        .context("failed to request a login code")?;
-
-    let code = config::prompt("Enter the login code Telegram sent you: ")?;
-    let result = client.sign_in(&token, &code).await;
-
-    match result {
-        Ok(_) => {}
-        Err(SignInError::PasswordRequired(password_token)) => {
-            let hint = password_token.hint().unwrap_or_default();
-            let message = if hint.is_empty() {
-                "Two-factor authentication is enabled. Enter your password: ".to_owned()
-            } else {
-                format!("Two-factor password (hint: {hint}): ")
-            };
-            let password = config::prompt_secret(&message)?;
-            client
-                .check_password(password_token, password)
-                .await
-                .context("two-factor authentication failed")?;
-        }
-        Err(SignInError::InvalidCode) => bail!("invalid login code"),
-        Err(SignInError::SignUpRequired) => {
-            bail!("this phone number is not registered on Telegram")
-        }
-        Err(err) => bail!("failed to sign in: {err}"),
-    }
-
-    info!("Signed in successfully");
-    Ok(())
 }
 
 /// Fetch dialogs once so that the session cache contains access hashes. Without

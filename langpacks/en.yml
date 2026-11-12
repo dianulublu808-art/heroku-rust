@@ -9,15 +9,24 @@ common:
 
 help:
   title: "🪐 <b>Heroku modules</b>"
+  subtitle: "⚡ Rust edition · v{}"
   module: "🪐 <b>{}</b>"
+  module_label: "Module"
   command: "▫️ <b>{}</b>"
   usage: "Usage"
+  aliases: "Aliases"
   no_module: "🚫 Module not found"
   no_commands: "No commands"
   commands: "Commands"
   author: "Author"
   support: "🪐 <b>Heroku support</b>\n<a href=\"https://t.me/heroku_userbot\">Channel</a> · <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a>"
   hidden_shown: "👁‍🗨 Hidden: {}\n👁 Shown: {}"
+  view_hint: "▫️ <code>{}</code> — module or command details"
+  suggestions: "🔎 <b>Did you mean:</b>\n{}"
+
+errors:
+  command_failed: "🚫 <b>Command</b> <code>{}</code> <b>failed</b>"
+  error: "🧾 <b>Error</b>"
 
 settings:
   title: "⚙️ <b>Heroku settings</b>"
@@ -77,13 +86,16 @@ backup:
 
 info:
   title: "🪐 <b>Heroku</b>"
+  subtitle: "⚡ Rust edition · AGPL-3.0"
   version: "▫️ Version: <b>{}</b>"
   uptime: "▫️ Uptime: <b>{}</b>"
   owner: "▫️ Owner: <b>{}</b>"
   modules: "▫️ Modules: <b>{}</b>"
+  prefix: "▫️ Prefix: <b>{}</b>"
   python: "▫️ Engine: <b>Rust</b>"
   platform: "▫️ Platform: <b>{}</b>"
-  user: "▫️ User: <b>{}</b>"
+  user: "▫️ Account: <b>{}</b>"
+  links: "🌐 <a href=\"https://github.com/dianulublu808-art/heroku-rust\">GitHub</a> · <a href=\"https://t.me/heroku_userbot\">Channel</a>"
 
 translations:
   current: "🌐 Current language: <b>{}</b>"
@@ -98,7 +110,17 @@ translate:
 
 test:
   pong: "🏓 <b>Pong!</b>\n▫️ Latency: <b>{}</b> ms"
+  logs_title: "🧾 <b>Logs</b> <i>({}/{})</i>"
   logs_cleared: "🧹 Logs cleared"
+  ids_title: "🆔 <b>Identifiers</b>"
+  id_user: "▫️ User: <code>{}</code>"
+  id_chat: "▫️ Chat: <code>{}</code>"
+  id_message: "▫️ Message: <code>{}</code>"
+  id_type: "▫️ Type: {}"
+  type_private: "private"
+  type_channel: "channel"
+  type_group: "group"
+  suspended_for: "⏸ <b>Paused for {}s</b>"
   suspended: "⏸ Command execution suspended"
   resumed: "▶️ Command execution resumed"
 

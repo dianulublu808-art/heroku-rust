@@ -1,11 +1,11 @@
 [package]
 name = "heroku"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Heroku Userbot — Rust rewrite"
 license = "AGPL-3.0"
-repository = "https://github.com/Heroku-userbot/Heroku"
+repository = "https://github.com/dianulublu808-art/heroku-rust"
 
 [[bin]]
 name = "heroku"

@@ -39,23 +39,46 @@ impl Module for HerokuInfoMod {
         message: &Msg,
         _args: &Args,
     ) -> Result<()> {
+        let owner_id = ctx.security.owners().first().copied().unwrap_or(ctx.me_id);
+        let owner = if owner_id == ctx.me_id {
+            format!(
+                "<a href=\"tg://user?id={owner_id}\">{}</a>",
+                escape_html(&ctx.me_name)
+            )
+        } else {
+            format!("<a href=\"tg://user?id={owner_id}\">{owner_id}</a>")
+        };
+        let account = ctx
+            .me_username
+            .as_ref()
+            .map(|username| format!("@{username}"))
+            .unwrap_or_else(|| escape_html(&ctx.me_name));
+        let prefix = ctx
+            .prefixes(ctx.me_id)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ".".to_owned());
+
         message
             .reply_html(format!(
-                "{title}\n\n\
+                "{title}\n<i>{subtitle}</i>\n\n\
                  {version}\n\
                  {uptime}\n\
                  {owner}\n\
-                 {user}\n\
+                 {account}\n\
                  {modules}\n\
+                 {prefix_line}\n\n\
                  {engine}\n\
                  {platform}\n\n\
-                 <i>🌐 <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a></i>",
+                 {links}",
                 title = ctx.tr("info.title"),
+                subtitle = ctx.tr("info.subtitle"),
                 version = ctx.tf("info.version", &[crate::config::VERSION]),
                 uptime = ctx.tf("info.uptime", &[&ctx.uptime()]),
-                owner = ctx.tf("info.owner", &[&ctx.me_id.to_string()]),
-                user = ctx.tf("info.user", &[&escape_html(&ctx.me_name)]),
+                owner = ctx.tf("info.owner", &[&owner]),
+                account = ctx.tf("info.user", &[&account]),
                 modules = ctx.tf("info.modules", &[&ctx.modules.all().len().to_string()]),
+                prefix_line = ctx.tf("info.prefix", &[&escape_html(&prefix)]),
                 engine = ctx.tr("info.python"),
                 platform = ctx.tf(
                     "info.platform",
@@ -65,6 +88,7 @@ impl Module for HerokuInfoMod {
                         std::env::consts::ARCH
                     )]
                 ),
+                links = ctx.tr("info.links"),
             ))
             .await?;
         Ok(())

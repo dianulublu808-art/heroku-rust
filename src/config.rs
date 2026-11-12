@@ -225,11 +225,16 @@ impl Config {
         };
         let phone = prompt("Enter phone number in international format (+...): ")?;
         let phone = phone.trim();
+        let language = prompt("Interface language / Язык интерфейса (en/ru) [en]: ")?;
+        let lang = match language.trim().to_lowercase() {
+            lang if lang.starts_with("ru") || lang.starts_with("uk") => "ru".to_owned(),
+            _ => default_lang(),
+        };
         let config = Self {
             api_id,
             api_hash,
             phone: (!phone.is_empty()).then(|| phone.to_owned()),
-            lang: default_lang(),
+            lang,
             log_level: default_log_level(),
             session_name: default_session_name(),
             inline_bot_token: None,
