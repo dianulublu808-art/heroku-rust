@@ -7,13 +7,15 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, Command};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::args::Args;
 use crate::ctx::Ctx;
@@ -40,8 +42,20 @@ struct Running {
     pid: u32,
 }
 
+#[derive(Clone)]
+struct SudoSession {
+    stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
+    prompted: Arc<AtomicBool>,
+}
+
 /// Active commands keyed by the id of the message that started them.
 static ACTIVE: LazyLock<Mutex<HashMap<i32, Running>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Processes waiting for a sudo password, keyed by `(chat_id, message_id)`.
+static SUDO: LazyLock<Mutex<HashMap<(i64, i32), SudoSession>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Fallback when the inline bot is unavailable: chat id -> command message id.
+static PENDING_CHAT_SUDO: LazyLock<Mutex<HashMap<i64, i32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub struct TerminalMod;
@@ -65,6 +79,35 @@ impl Module for TerminalMod {
                 .usage("[-f]")
                 .aliases(&["kill"]),
         ]
+    }
+
+    fn has_watcher(&self) -> bool {
+        true
+    }
+
+    async fn on_message(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<bool> {
+        let chat_id = message.chat_id();
+        let pending = PENDING_CHAT_SUDO
+            .lock()
+            .ok()
+            .and_then(|pending| pending.get(&chat_id).copied());
+        let Some(message_id) = pending else {
+            return Ok(false);
+        };
+        if message.sender_id() != Some(ctx.me_id) {
+            return Ok(false);
+        }
+        let text = message.text().trim().to_owned();
+        if text.is_empty() {
+            return Ok(false);
+        }
+        if let Ok(mut pending) = PENDING_CHAT_SUDO.lock() {
+            pending.remove(&chat_id);
+        }
+        let _ = message.delete().await;
+        let html = submit_sudo_password(ctx, chat_id, message_id, &text).await;
+        message.reply_html(html).await?;
+        Ok(true)
     }
 
     async fn handle(
@@ -106,10 +149,21 @@ async fn run(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
     }
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-    let mut builder = Command::new(shell);
+    let fish = std::path::Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "fish");
+    let script = if fish {
+        format!(
+            "function sudo\n    command sudo -S -p '[heroku-sudo] password:' $argv\nend\n{command}"
+        )
+    } else {
+        format!("sudo() {{ command sudo -S -p '[heroku-sudo] password:' \"$@\"; }};\n{command}")
+    };
+    let mut builder = Command::new(&shell);
     builder
         .arg("-lc")
-        .arg(&command)
+        .arg(&script)
         .current_dir(&ctx.data_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -138,6 +192,10 @@ async fn run(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
         active.insert(message.id(), Running { pid });
     }
 
+    let sudo_key = (message.chat_id(), message.id());
+    let stdin_handle = Arc::new(AsyncMutex::new(child.stdin.take()));
+    let prompted = Arc::new(AtomicBool::new(false));
+
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let output = Arc::new(Mutex::new(String::new()));
@@ -153,6 +211,38 @@ async fn run(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
             _ = interval.tick() => {
                 let snapshot = snapshot(&output, &command, started, None);
                 let _ = response.edit_html(&snapshot).await;
+                if !prompted.load(Ordering::Relaxed) && sudo_prompt_seen(&output) {
+                    prompted.store(true, Ordering::Relaxed);
+                    if let Ok(mut sudo) = SUDO.lock() {
+                        sudo.insert(
+                            sudo_key,
+                            SudoSession {
+                                stdin: stdin_handle.clone(),
+                                prompted: prompted.clone(),
+                            },
+                        );
+                    }
+                    let prompt = ctx.tr("terminal.sudo_prompt");
+                    if ctx
+                        .inline
+                        .send_to_user(ctx, ctx.me_id, prompt, Vec::new())
+                        .await
+                        .is_ok()
+                    {
+                        ctx.inline.set_pending(
+                            ctx.me_id,
+                            crate::inline::PendingInput::SudoPassword {
+                                chat_id: sudo_key.0,
+                                message_id: sudo_key.1,
+                            },
+                        );
+                    } else {
+                        if let Ok(mut pending) = PENDING_CHAT_SUDO.lock() {
+                            pending.insert(sudo_key.0, sudo_key.1);
+                        }
+                        let _ = message.reply_html(ctx.tr("terminal.sudo_chat_prompt")).await;
+                    }
+                }
             }
         }
         if started.elapsed() > RUN_TIMEOUT {
@@ -170,6 +260,14 @@ async fn run(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
     }
     if let Ok(mut active) = ACTIVE.lock() {
         active.remove(&message.id());
+    }
+    if let Ok(mut sudo) = SUDO.lock() {
+        sudo.remove(&sudo_key);
+    }
+    if let Ok(mut pending) = PENDING_CHAT_SUDO.lock() {
+        if pending.get(&sudo_key.0) == Some(&sudo_key.1) {
+            pending.remove(&sudo_key.0);
+        }
     }
 
     let code = status.map(|status| status.code());
@@ -244,6 +342,42 @@ fn kill_group(pid: u32, forceful: bool) {
             "kill -{signal} -{pid} 2>/dev/null || kill -{signal} {pid} 2>/dev/null"
         ))
         .status();
+}
+
+fn sudo_prompt_seen(output: &Arc<Mutex<String>>) -> bool {
+    output
+        .lock()
+        .map(|buffer| buffer.contains("[heroku-sudo] password:"))
+        .unwrap_or(false)
+}
+
+/// Feed a sudo password to a running terminal command and report the result.
+pub(crate) async fn submit_sudo_password(
+    ctx: &Arc<Ctx>,
+    chat_id: i64,
+    message_id: i32,
+    password: &str,
+) -> String {
+    let session = SUDO
+        .lock()
+        .ok()
+        .and_then(|sudo| sudo.get(&(chat_id, message_id)).cloned());
+    let Some(session) = session else {
+        return ctx.tr("terminal.sudo_expired");
+    };
+
+    let mut guard = session.stdin.lock().await;
+    let Some(stdin) = guard.as_mut() else {
+        return ctx.tr("terminal.sudo_expired");
+    };
+    match stdin.write_all(format!("{password}\n").as_bytes()).await {
+        Ok(()) => {
+            let _ = stdin.flush().await;
+            session.prompted.store(false, Ordering::Relaxed);
+            ctx.tr("terminal.sudo_sent")
+        }
+        Err(err) => ctx.tf("terminal.sudo_failed", &[&escape_html(&err.to_string())]),
+    }
 }
 
 async fn terminate(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {

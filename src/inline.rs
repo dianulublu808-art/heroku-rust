@@ -76,6 +76,10 @@ pub enum PendingInput {
     },
     OwnerAdd,
     GroupCreate,
+    SudoPassword {
+        chat_id: i64,
+        message_id: i32,
+    },
 }
 
 /// Owns the optional bot connection and all inline state.
@@ -964,6 +968,25 @@ impl InlineManager {
                             .html(html)
                             .reply_markup(ReplyMarkup::from_buttons(&buttons)),
                     )
+                    .await?;
+                return Ok(());
+            }
+
+            if let PendingInput::SudoPassword {
+                chat_id,
+                message_id,
+            } = &pending
+            {
+                let html = crate::modules::terminal::submit_sudo_password(
+                    ctx,
+                    *chat_id,
+                    *message_id,
+                    text,
+                )
+                .await;
+                let _ = client.delete_messages(peer, &[message.id()]).await;
+                client
+                    .send_message(peer, InputMessage::new().html(html))
                     .await?;
                 return Ok(());
             }

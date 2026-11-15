@@ -72,7 +72,9 @@ impl Dispatcher {
         }
 
         self.remember_state(ctx, &message);
-        self.run_watchers(ctx, &message).await;
+        if self.run_watchers(ctx, &message).await {
+            return;
+        }
 
         if let Some(prepared) = self.prepare(ctx, message).await {
             if !self
@@ -222,7 +224,7 @@ impl Dispatcher {
         false
     }
 
-    async fn run_watchers(&self, ctx: &Arc<Ctx>, message: &Msg) {
+    async fn run_watchers(&self, ctx: &Arc<Ctx>, message: &Msg) -> bool {
         let disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
         let chat_id = message.chat_id();
 
@@ -262,13 +264,14 @@ impl Dispatcher {
             }
 
             match module.on_message(ctx, message).await {
-                Ok(true) => return,
+                Ok(true) => return true,
                 Ok(false) => {}
                 Err(err) => {
                     tracing::error!("Watcher {} failed: {err:#}", module.name());
                 }
             }
         }
+        false
     }
 
     async fn prepare(&self, ctx: &Arc<Ctx>, message: Msg) -> Option<Prepared> {

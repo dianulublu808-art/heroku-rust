@@ -326,6 +326,11 @@ terminal:
   no_cmd: "🚫 <b>No running command found for that message</b>"
   killed: "✅ <b>Process stopped</b>"
   kill_fail: "🚫 <b>Failed to stop the process</b>"
+  sudo_prompt: "🔑 <b>The command asks for a sudo password.</b>\nSend it in this chat — the message will be deleted right away. Send /start to cancel."
+  sudo_chat_prompt: "🔑 <b>The command asks for a sudo password.</b>\nSend it in this chat — the message will be deleted right away."
+  sudo_sent: "🔑 <b>Password sent to the command</b>"
+  sudo_expired: "⌛️ <b>The sudo prompt has already expired</b>"
+  sudo_failed: "🚫 <b>Failed to send the password:</b> <code>{}</code>"
 
 eval:
   usage: "🚫 Usage: .e <expression>"
