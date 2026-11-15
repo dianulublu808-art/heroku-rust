@@ -1251,6 +1251,26 @@ impl InlineManager {
         let (html, buttons) = match action {
             "o" => match parts.get(3).copied().unwrap_or_default() {
                 "" => crate::modules::heroku_security::owner_card(ctx),
+                "cf" => {
+                    let user = parts
+                        .get(4)
+                        .and_then(|value| value.parse::<i64>().ok())
+                        .unwrap_or_default();
+                    let nonick = parts.get(5).copied() == Some("1");
+                    let prefix = parts
+                        .get(6)
+                        .and_then(|value| crate::modules::heroku_security::hex_decode(value))
+                        .map(|value| {
+                            value
+                                .split('\n')
+                                .filter(|item| !item.is_empty())
+                                .map(ToOwned::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    crate::modules::heroku_security::apply_owner_add(ctx, user, nonick, prefix)
+                        .await
+                }
                 "add" => {
                     self.set_pending(user_id, PendingInput::OwnerAdd);
                     let _ = call
@@ -1387,6 +1407,34 @@ impl InlineManager {
                 None => crate::modules::heroku_security::global_mask_card(ctx, false),
             },
             "query" => crate::modules::heroku_security::toggle_querysec(ctx),
+            "nn" => {
+                let user = parts
+                    .get(3)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or_default();
+                let html = crate::modules::heroku_security::enable_nonick(ctx, user).await;
+                (html, Vec::new())
+            }
+            "tc" => {
+                let id = parts
+                    .get(3)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+                match crate::modules::heroku_security::choose_rule(ctx, id).await {
+                    Some(card) => card,
+                    None => crate::modules::heroku_security::security_card(ctx),
+                }
+            }
+            "tr" => {
+                let id = parts
+                    .get(3)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+                (
+                    crate::modules::heroku_security::apply_rule(ctx, id),
+                    Vec::new(),
+                )
+            }
             _ => crate::modules::heroku_security::security_card(ctx),
         };
 
@@ -1835,22 +1883,32 @@ impl InlineManager {
                     let _ = call.answer().send().await;
                 }
             }
-            _ if data.starts_with("heroku/lang/") => {
-                let lang = data.trim_start_matches("heroku/lang/").to_lowercase();
-                if ctx.translator.available().contains(&lang.as_str()) {
-                    ctx.translator.set_lang(&lang);
-                    ctx.db.set("heroku.translations", "lang", lang.as_str());
-                    let (html, buttons) = crate::modules::translations::language_card(ctx);
+            _ if data.starts_with("heroku:langwelcome/") => {
+                let code = crate::translations::canonical_lang(
+                    data.trim_start_matches("heroku:langwelcome/"),
+                );
+                if crate::translations::is_known_lang(&code) {
+                    ctx.translator.set_lang(&code);
+                    ctx.db.set("heroku.translations", "lang", code);
+                    let message = InputMessage::new()
+                        .html(ctx.tr("quickstart.text"))
+                        .reply_markup(welcome_markup());
                     let _ = call
                         .answer()
-                        .text(ctx.tf("translations.set", &[&lang]))
-                        .edit(
-                            InputMessage::new()
-                                .html(html)
-                                .reply_markup(ReplyMarkup::from_buttons(&buttons)),
-                        )
+                        .text(ctx.tr("quickstart.language_saved"))
+                        .edit(message)
                         .await;
                 } else {
+                    let _ = call.answer().send().await;
+                }
+            }
+            _ if data.starts_with("heroku:logs:") => {
+                if !crate::modules::test::handle_inline_callback(ctx, call, &data).await? {
+                    let _ = call.answer().send().await;
+                }
+            }
+            _ if data.starts_with("heroku:lang/") || data.starts_with("heroku:langs/") => {
+                if !crate::modules::translations::handle_inline_callback(ctx, call, &data).await? {
                     let _ = call.answer().send().await;
                 }
             }
@@ -2195,13 +2253,13 @@ fn welcome_markup() -> ReplyMarkup {
     ReplyMarkup::from_buttons(&[
         vec![Button::url("💬 Support", SUPPORT_URL)],
         vec![
-            Button::data("🇬🇧 English", b"heroku/lang/en".to_vec()),
-            Button::data("🇷🇺 Русский", b"heroku/lang/ru".to_vec()),
+            Button::data("🇬🇧 English", b"heroku:langwelcome/en".to_vec()),
+            Button::data("🇷🇺 Русский", b"heroku:langwelcome/ru".to_vec()),
         ],
         vec![
-            Button::data("🇺🇦 Українська", b"heroku/lang/uk".to_vec()),
-            Button::data("🇩🇪 Deutsch", b"heroku/lang/de".to_vec()),
-            Button::data("🇯🇵 日本語", b"heroku/lang/ja".to_vec()),
+            Button::data("🇺🇦 Українська", b"heroku:langwelcome/uk".to_vec()),
+            Button::data("🇩🇪 Deutsch", b"heroku:langwelcome/de".to_vec()),
+            Button::data("🇯🇵 日本語", b"heroku:langwelcome/ja".to_vec()),
         ],
     ])
 }

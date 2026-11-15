@@ -1,7 +1,7 @@
 // ©️ Heroku Userbot — Rust rewrite
 // Licensed under the GNU AGPLv3. See LICENSE.
 
-//! `.tr` — translate text through Google Translate.
+//! `.tr` — translate text or a replied message.
 
 use std::sync::Arc;
 
@@ -34,14 +34,14 @@ impl Module for Translator {
         vec![
             ConfigSpec::new(
                 "provider",
-                "Translation provider (only google is implemented)",
+                "Translation provider",
                 ConfigDefault::Text("google"),
-                ConfigKind::Choice(&["google", "telegram"]),
+                ConfigKind::Choice(&["google"]),
             ),
             ConfigSpec::new(
                 "only_text",
-                "Return only the translated text",
-                ConfigDefault::Bool(true),
+                "Return only the translated text without the template",
+                ConfigDefault::Bool(false),
                 ConfigKind::Bool,
             ),
         ]
@@ -55,42 +55,52 @@ impl Module for Translator {
         args: &Args,
     ) -> Result<()> {
         let raw = args.raw.trim();
-        let mut lang = "en".to_owned();
+        let default_lang = ctx.tr("translate.language");
 
-        let (first, rest) = super::common::split_once(raw);
-        let mut text = if first.chars().count() == 2 && !rest.is_empty() {
-            lang = first.to_lowercase();
-            rest.to_owned()
-        } else {
-            raw.to_owned()
-        };
+        let mut lang = default_lang.clone();
+        let mut text: Option<String> = None;
+        if !raw.is_empty() {
+            let (first, rest) = super::common::split_once(raw);
+            if first.chars().count() == 2 {
+                lang = first.to_lowercase();
+                if !rest.is_empty() {
+                    text = Some(rest.to_owned());
+                }
+            } else {
+                text = Some(raw.to_owned());
+            }
+        }
 
-        if text.is_empty() {
+        if text.is_none() {
             let Some(reply) = message.get_reply().await? else {
-                message.reply_html(ctx.tr("translate.usage")).await?;
+                message.reply_html(ctx.tr("translate.no_args")).await?;
                 return Ok(());
             };
-            text = reply.text().to_owned();
+            let body = reply.text().trim().to_owned();
+            if body.is_empty() {
+                message.reply_html(ctx.tr("translate.no_args")).await?;
+                return Ok(());
+            }
+            text = Some(body);
         }
 
-        if text.trim().is_empty() {
-            message.reply_html(ctx.tr("translate.usage")).await?;
-            return Ok(());
-        }
-
+        let text = text.unwrap_or_default();
         let translated = match translate(&text, &lang).await {
             Ok(text) => text,
             Err(err) => {
-                message
-                    .reply_html(ctx.tf("translate.error", &[&escape_html(&format!("{err:#}"))]))
-                    .await?;
+                tracing::warn!("Translation failed: {err:#}");
+                message.reply_html(ctx.tr("translate.error")).await?;
                 return Ok(());
             }
         };
 
-        message
-            .reply_html(ctx.tf("translate.result", &[&escape_html(&translated)]))
-            .await?;
+        let only_text = ctx.db.get_bool("Translator", "only_text", false);
+        let response = if only_text {
+            escape_html(&translated)
+        } else {
+            ctx.tf("translate.result", &[&escape_html(&translated)])
+        };
+        message.reply_html(response).await?;
         Ok(())
     }
 }

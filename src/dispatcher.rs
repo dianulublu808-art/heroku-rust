@@ -170,14 +170,16 @@ impl Dispatcher {
 
     fn chat_blocked(&self, ctx: &Ctx, message: &Msg) -> bool {
         let chat_id = message.chat_id();
+        let bare_id = crate::modules::common::blacklist_chat_id(chat_id);
         let blacklist = ctx.db.get_value("heroku.main", "blacklist_chats");
         let whitelist = ctx.db.get_value("heroku.main", "whitelist_chats");
         let contains_id = |value: &Value| -> bool {
             match value {
                 Value::Array(items) => items.iter().any(|item| {
                     item.as_i64() == Some(chat_id)
+                        || item.as_i64() == Some(bare_id)
                         || item.as_str() == Some(&chat_id.to_string())
-                        || item.as_str() == Some(&format!("{chat_id}"))
+                        || item.as_str() == Some(&bare_id.to_string())
                 }),
                 _ => false,
             }
@@ -195,12 +197,14 @@ impl Dispatcher {
 
     fn module_blocked(&self, ctx: &Ctx, message: &Msg, module: &str) -> bool {
         let chat_id = message.chat_id();
-        let key = format!("{chat_id}.{module}");
+        let bare_id = crate::modules::common::blacklist_chat_id(chat_id);
+        let keys = [format!("{chat_id}.{module}"), format!("{bare_id}.{module}")];
+        let matches = |keys: &[String], item: &str| keys.iter().any(|key| key == item);
         if let Some(Value::Array(items)) = ctx.db.get_value("heroku.main", "blacklist_chats") {
             if items
                 .iter()
                 .filter_map(Value::as_str)
-                .any(|item| item == key)
+                .any(|item| matches(&keys, item))
             {
                 return true;
             }
@@ -210,7 +214,7 @@ impl Dispatcher {
                 && !items
                     .iter()
                     .filter_map(Value::as_str)
-                    .any(|item| item == key)
+                    .any(|item| matches(&keys, item))
             {
                 return true;
             }

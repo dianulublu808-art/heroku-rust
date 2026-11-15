@@ -33,6 +33,16 @@ pub async fn target_chat(ctx: &Arc<Ctx>, message: &Msg, raw: &str) -> Option<Pee
     ctx.resolve(raw).await
 }
 
+/// Normalize a chat id the way Python's `utils.get_chat_id` does: channels are
+/// stored without the `-100` prefix.
+pub fn blacklist_chat_id(chat_id: i64) -> i64 {
+    if chat_id <= -1_000_000_000_000 {
+        chat_id + 1_000_000_000_000
+    } else {
+        chat_id
+    }
+}
+
 pub fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_lowercase().as_str() {
         "1" | "true" | "yes" | "on" | "enable" | "enabled" | "+" => Some(true),

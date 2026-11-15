@@ -130,16 +130,14 @@ impl CoreMod {
     }
 
     fn blacklist_entry(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> String {
-        let mut chat_id = message.chat_id();
+        let mut chat_id = crate::modules::common::blacklist_chat_id(message.chat_id());
         let mut module: Option<String> = None;
         for value in &args.list {
             match value.parse::<i64>() {
-                Ok(id) => chat_id = id,
+                Ok(id) => chat_id = crate::modules::common::blacklist_chat_id(id),
                 Err(_) => {
                     if let Some(found) = ctx.modules.get(value) {
                         module = Some(found.name().to_owned());
-                    } else if module.is_none() {
-                        module = Some(value.clone());
                     }
                 }
             }

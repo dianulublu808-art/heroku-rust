@@ -23,10 +23,21 @@ pub const LANGUAGES: &[&str] = &[
     "en", "ru", "uk", "de", "ja", "leet", "uwu", "tiktok", "neofit",
 ];
 
+/// Officially shipped languages (the first picker page).
+pub const OFFICIAL_LANGUAGES: &[&str] = &["en", "ru", "uk", "de", "ja"];
+
+/// Meme languages, shown on the second picker page.
+pub const MEME_LANGUAGES: &[&str] = &["leet", "uwu", "tiktok", "neofit"];
+
+/// Whether a token is a language we ship a pack for.
+pub fn is_known_lang(token: &str) -> bool {
+    LANGUAGES.contains(&token)
+}
+
 pub struct Translator {
-    lang: RwLock<String>,
+    langs: RwLock<Vec<String>>,
     packs: HashMap<String, HashMap<String, String>>,
-    external: RwLock<Vec<HashMap<String, String>>>,
+    external: RwLock<HashMap<String, HashMap<String, String>>>,
 }
 
 impl Translator {
@@ -46,15 +57,16 @@ impl Translator {
             packs.insert(code.to_owned(), load_pack(raw));
         }
         Self {
-            lang: RwLock::new(normalize_lang(&lang.into())),
+            langs: RwLock::new(parse_langs(&lang.into())),
             packs,
-            external: RwLock::new(Vec::new()),
+            external: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Merge an external YAML/JSON language pack. Later packs take precedence.
-    /// Returns the number of loaded keys.
-    pub fn merge_external(&self, raw: &str) -> usize {
+    /// Merge an external YAML/JSON language pack loaded from `url`. Packs are
+    /// only applied when their URL is part of the active language list, which
+    /// mirrors Python's space-separated `lang` setting.
+    pub fn merge_external(&self, url: &str, raw: &str) -> usize {
         let mut pack = HashMap::new();
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
             flatten_json("", &value, &mut pack);
@@ -64,7 +76,7 @@ impl Translator {
         let count = pack.len();
         if count > 0 {
             if let Ok(mut external) = self.external.write() {
-                external.push(pack);
+                external.insert(url.to_owned(), pack);
             }
         }
         count
@@ -83,17 +95,32 @@ impl Translator {
             .unwrap_or(0)
     }
 
+    /// Primary (first non-URL) language code.
     pub fn lang(&self) -> String {
-        self.lang
+        self.langs
             .read()
-            .map(|lang| lang.clone())
+            .map(|langs| {
+                langs
+                    .iter()
+                    .find(|token| !is_url(token))
+                    .cloned()
+                    .unwrap_or_else(|| "en".to_owned())
+            })
+            .unwrap_or_else(|_| "en".to_owned())
+    }
+
+    /// Full space-separated language list, including external pack URLs.
+    pub fn langs(&self) -> String {
+        self.langs
+            .read()
+            .map(|langs| langs.join(" "))
             .unwrap_or_else(|_| "en".to_owned())
     }
 
     pub fn set_lang(&self, lang: &str) {
-        let lang = normalize_lang(lang);
-        if let Ok(mut current) = self.lang.write() {
-            *current = lang;
+        let langs = parse_langs(lang);
+        if let Ok(mut current) = self.langs.write() {
+            *current = langs;
         }
     }
 
@@ -102,24 +129,24 @@ impl Translator {
     }
 
     /// Translate a dotted key, e.g. `help.title`.
+    ///
+    /// Packs are applied in order: English first, then every entry of the
+    /// language list, so later languages override earlier ones.
     pub fn t(&self, key: &str) -> String {
-        if let Ok(external) = self.external.read() {
-            if let Some(value) = external
-                .iter()
-                .rev()
-                .find_map(|pack| pack.get(key).cloned())
-            {
-                return value;
+        let mut value = self.packs.get("en").and_then(|pack| pack.get(key)).cloned();
+        if let (Ok(langs), Ok(external)) = (self.langs.read(), self.external.read()) {
+            for token in langs.iter() {
+                let pack = if is_url(token) {
+                    external.get(token)
+                } else {
+                    self.packs.get(token)
+                };
+                if let Some(found) = pack.and_then(|pack| pack.get(key)) {
+                    value = Some(found.clone());
+                }
             }
         }
-        let lang = self.lang();
-        if let Some(value) = self.packs.get(&lang).and_then(|pack| pack.get(key)) {
-            return value.clone();
-        }
-        if let Some(value) = self.packs.get("en").and_then(|pack| pack.get(key)) {
-            return value.clone();
-        }
-        key.to_owned()
+        value.unwrap_or_else(|| key.to_owned())
     }
 
     /// Translate and replace `{}` placeholders in order.
@@ -148,6 +175,30 @@ impl Translator {
 /// Resolve a user-provided language code to its canonical form.
 pub fn canonical_lang(lang: &str) -> String {
     normalize_lang(lang)
+}
+
+pub fn is_url(token: &str) -> bool {
+    token.starts_with("http://") || token.starts_with("https://")
+}
+
+/// Split a space-separated language setting into canonical tokens, preserving
+/// order and removing duplicates (Python normalizes the same way).
+pub fn parse_langs(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in raw.split_whitespace() {
+        let token = if is_url(token) {
+            token.to_owned()
+        } else {
+            normalize_lang(token)
+        };
+        if !out.contains(&token) {
+            out.push(token);
+        }
+    }
+    if out.is_empty() {
+        out.push("en".to_owned());
+    }
+    out
 }
 
 fn normalize_lang(lang: &str) -> String {
@@ -258,12 +309,28 @@ mod tests {
     fn merges_external_packs() {
         let translator = Translator::new("en");
         assert_eq!(
-            translator.merge_external("help:\n  title: External title\n"),
+            translator.merge_external(
+                "https://example.com/pack.yml",
+                "help:\n  title: External title\n"
+            ),
             1
         );
+        // A URL pack only applies when it is part of the language list.
+        assert_ne!(translator.t("help.title"), "External title");
+        translator.set_lang("en https://example.com/pack.yml");
         assert_eq!(translator.t("help.title"), "External title");
         assert_eq!(translator.external_count(), 1);
         translator.clear_external();
         assert_ne!(translator.t("help.title"), "External title");
+    }
+
+    #[test]
+    fn stacks_languages_in_order() {
+        let translator = Translator::new("en ru");
+        assert_eq!(translator.lang(), "en");
+        assert!(translator.t("help.title").contains("Модули"));
+        assert_eq!(translator.langs(), "en ru");
+        translator.set_lang("ua");
+        assert_eq!(translator.lang(), "uk");
     }
 }

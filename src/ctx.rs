@@ -178,19 +178,17 @@ impl Ctx {
         peer.to_ref().await.ok().flatten()
     }
 
-    /// Resolve the target user from a reply or from the first argument.
+    /// Resolve the target user from the first argument, falling back to a reply.
     pub async fn target_user(&self, message: &Msg, raw: &str) -> Option<PeerRef> {
-        if let Some(reply) = message.get_reply().await.ok().flatten() {
-            if let Some(peer_id) = reply.inner.sender_id() {
-                if let Some(peer_ref) = self.resolve_peer_ref(peer_id).await {
-                    return Some(peer_ref);
-                }
+        let raw = raw.trim().trim_start_matches('@');
+        if !raw.is_empty() {
+            if let Some(peer) = self.resolve(raw).await {
+                return Some(peer);
             }
         }
-        if raw.trim().is_empty() {
-            return None;
-        }
-        self.resolve(raw).await
+        let reply = message.get_reply().await.ok().flatten()?;
+        let peer_id = reply.inner.sender_id()?;
+        self.resolve_peer_ref(peer_id).await
     }
 
     /// Permission bits of the message sender in the current chat.

@@ -225,7 +225,7 @@ async fn placeholders(ctx: &Arc<Ctx>, banner: &str) -> HashMap<String, String> {
 
 /// Replace `{name}` placeholders, keeping unknown ones visible as an error so
 /// typos in a custom message are easy to spot (same as Python).
-fn render(template: &str, data: &HashMap<String, String>, missing: &str) -> String {
+pub(crate) fn render(template: &str, data: &HashMap<String, String>, missing: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let chars: Vec<char> = template.chars().collect();
     let mut index = 0;
@@ -257,7 +257,7 @@ fn render(template: &str, data: &HashMap<String, String>, missing: &str) -> Stri
     out
 }
 
-fn platform_name() -> String {
+pub(crate) fn platform_name() -> String {
     if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
         let model = model.trim().to_owned();
         if model.contains("Orange") || model.contains("Raspberry") {
@@ -287,7 +287,7 @@ fn platform_name() -> String {
     }
 }
 
-fn platform_emoji() -> String {
+pub(crate) fn platform_emoji() -> String {
     if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
         if model.contains("Orange") {
             return "🍊".to_owned();
@@ -308,7 +308,7 @@ fn platform_emoji() -> String {
     .to_owned()
 }
 
-fn platform_custom_emoji() -> String {
+pub(crate) fn platform_custom_emoji() -> String {
     let id = match platform_name().as_str() {
         "HikkaHost" => "5395745114494624362",
         "UserLand" => "5458877818031077824",
@@ -323,14 +323,14 @@ fn platform_custom_emoji() -> String {
     )
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|name| name.trim().to_owned())
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| std::env::consts::OS.to_owned())
 }
 
-fn current_user() -> String {
+pub(crate) fn current_user() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "user".to_owned())

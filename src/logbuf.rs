@@ -36,6 +36,28 @@ impl LogBuffer {
             .unwrap_or_default()
     }
 
+    /// Select log lines at or above `min_level`, optionally filtered by tracing
+    /// target (module path). Mirrors the Python `.logs` filtering.
+    pub fn select(&self, min_level: i32, modules: &[String]) -> Vec<String> {
+        self.lines
+            .lock()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter(|line| {
+                        let (level, target) = parse(line);
+                        level >= min_level
+                            && (modules.is_empty()
+                                || modules.iter().any(|module| {
+                                    target.to_lowercase().contains(&module.to_lowercase())
+                                }))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn clear(&self) {
         if let Ok(mut lines) = self.lines.lock() {
             lines.clear();
@@ -53,6 +75,24 @@ impl LogBuffer {
 pub struct TeeWriter {
     buffer: LogBuffer,
     line: String,
+}
+
+/// Parse a formatted tracing line into a numeric severity and target.
+fn parse(line: &str) -> (i32, &str) {
+    for (token, level) in [
+        ("TRACE", 5),
+        ("DEBUG", 10),
+        ("INFO", 20),
+        ("WARN", 30),
+        ("ERROR", 40),
+    ] {
+        if let Some(index) = line.find(&format!(" {token} ")) {
+            let rest = &line[index + token.len() + 2..];
+            let target = rest.split_once(": ").map(|(name, _)| name).unwrap_or(rest);
+            return (level, target.trim());
+        }
+    }
+    (5, "")
 }
 
 impl Write for TeeWriter {

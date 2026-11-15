@@ -226,6 +226,21 @@ impl Msg {
         Ok(Msg::new(self.inner.respond(message).await?))
     }
 
+    pub async fn reply_file(
+        &self,
+        client: &Client,
+        path: &Path,
+        caption: impl Into<String>,
+    ) -> Result<Msg> {
+        crate::protection::guard().await;
+        let uploaded = client
+            .upload_file(path)
+            .await
+            .with_context(|| format!("failed to upload {}", path.display()))?;
+        let message = InputMessage::new().html(caption.into()).file(uploaded);
+        Ok(Msg::new(self.inner.reply(message).await?))
+    }
+
     pub async fn edit_html(&self, html: impl Into<String>) -> Result<()> {
         crate::protection::guard().await;
         self.inner

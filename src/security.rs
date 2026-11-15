@@ -414,6 +414,65 @@ impl Security {
         rules.len() != before && self.db.set(NS, key, Value::Array(rules))
     }
 
+    pub fn remove_tsec_rule(&self, target_type: &str, target: i64, rule: &str) -> bool {
+        let key = if target_type == "chat" {
+            "tsec_chat"
+        } else {
+            "tsec_user"
+        };
+        let mut rules = self.db.get_array(NS, key);
+        let before = rules.len();
+        rules.retain(|item| {
+            item.get("target").and_then(Value::as_i64) != Some(target)
+                || item.get("rule").and_then(Value::as_str) != Some(rule)
+        });
+        rules.len() != before && self.db.set(NS, key, Value::Array(rules))
+    }
+
+    pub fn clear_tsec_target(&self, target_type: &str, target: i64) -> bool {
+        let key = if target_type == "chat" {
+            "tsec_chat"
+        } else {
+            "tsec_user"
+        };
+        let mut rules = self.db.get_array(NS, key);
+        let before = rules.len();
+        rules.retain(|item| item.get("target").and_then(Value::as_i64) != Some(target));
+        rules.len() != before && self.db.set(NS, key, Value::Array(rules))
+    }
+
+    pub fn remove_group_rule(&self, name: &str, rule: &str) -> bool {
+        let mut groups = self.sgroups();
+        let Some(mut group) = groups
+            .remove(name)
+            .and_then(|value| value.as_object().cloned())
+        else {
+            return false;
+        };
+        let mut permissions = group
+            .remove("permissions")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        let before = permissions.len();
+        permissions.retain(|item| item.get("rule").and_then(Value::as_str) != Some(rule));
+        group.insert("permissions".to_owned(), Value::Array(permissions));
+        groups.insert(name.to_owned(), Value::Object(group));
+        self.save_sgroups(groups) && before != 0
+    }
+
+    pub fn clear_group_rules(&self, name: &str) -> bool {
+        let mut groups = self.sgroups();
+        let Some(mut group) = groups
+            .remove(name)
+            .and_then(|value| value.as_object().cloned())
+        else {
+            return false;
+        };
+        group.insert("permissions".to_owned(), Value::Array(Vec::new()));
+        groups.insert(name.to_owned(), Value::Object(group));
+        self.save_sgroups(groups)
+    }
+
     pub fn tsec_rules(&self) -> Vec<Value> {
         let mut out = self.db.get_array(NS, "tsec_user");
         out.extend(self.db.get_array(NS, "tsec_chat"));

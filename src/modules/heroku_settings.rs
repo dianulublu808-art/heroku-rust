@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use grammers_client::message::Button;
+use grammers_session::types::PeerId;
 use serde_json::Value;
 
 use crate::args::Args;
@@ -81,61 +82,82 @@ impl Module for HerokuSettingsMod {
             "settings" => self.settings(ctx, message, args).await,
             "watchers" => self.watchers(ctx, message).await,
             "watcher" => self.toggle_watcher(ctx, message, args).await,
-            "watcherbl" => self.watcher_blacklist(ctx, message).await,
-            "nonickuser" => self.nonick_user(ctx, message, args).await,
+            "watcherbl" => self.watcher_blacklist(ctx, message, args).await,
+            "nonickuser" => self.nonick_user(ctx, message).await,
             "nonickchat" => self.nonick_chat(ctx, message).await,
             "nonickcmd" => self.nonick_command(ctx, message, args).await,
             "nonickusers" => {
                 let users = ctx.db.get_i64_list("heroku.main", "nonickusers");
+                if users.is_empty() {
+                    message.reply_html(ctx.tr("settings.nothing")).await?;
+                    return Ok(());
+                }
+                let mut lines = Vec::new();
+                for id in users {
+                    let peer = PeerId::from_bot_api_dialog_id(id);
+                    let name = match peer {
+                        Some(peer_id) => match ctx.resolve_peer_ref(peer_id).await {
+                            Some(peer_ref) => ctx
+                                .client
+                                .resolve_peer(peer_ref)
+                                .await
+                                .ok()
+                                .and_then(|peer| peer.name().map(ToOwned::to_owned))
+                                .unwrap_or_else(|| id.to_string()),
+                            None => id.to_string(),
+                        },
+                        None => id.to_string(),
+                    };
+                    lines.push(format!(
+                        "▫️ <b><a href=\"tg://user?id={id}\">{}</a></b>",
+                        escape_html(&name)
+                    ));
+                }
                 message
-                    .reply_html(format!(
-                        "👤 <b>Nickname-exempt users</b>\n{}",
-                        if users.is_empty() {
-                            "▫️ None".to_owned()
-                        } else {
-                            users
-                                .iter()
-                                .map(|id| format!("▪️ <code>{id}</code>"))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
-                    ))
+                    .reply_html(ctx.tf("settings.user_nn_list", &[&lines.join("\n")]))
                     .await?;
                 Ok(())
             }
             "nonickchats" => {
                 let chats = ctx.db.get_i64_list("heroku.main", "nonickchats");
+                if chats.is_empty() {
+                    message.reply_html(ctx.tr("settings.nothing")).await?;
+                    return Ok(());
+                }
+                let lines = chats
+                    .iter()
+                    .map(|id| format!("▫️ <code>{id}</code>"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 message
-                    .reply_html(format!(
-                        "💬 <b>Nickname-exempt chats</b>\n{}",
-                        if chats.is_empty() {
-                            "▫️ None".to_owned()
-                        } else {
-                            chats
-                                .iter()
-                                .map(|id| format!("▪️ <code>{id}</code>"))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
-                    ))
+                    .reply_html(ctx.tf("settings.chat_nn_list", &[&lines]))
                     .await?;
                 Ok(())
             }
             "nonickcmds" => {
                 let commands = ctx.db.get_string_list("heroku.main", "nonickcmds");
+                if commands.is_empty() {
+                    message.reply_html(ctx.tr("settings.nothing")).await?;
+                    return Ok(());
+                }
+                let prefix = ctx
+                    .prefixes(ctx.me_id)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| ".".to_owned());
+                let lines = commands
+                    .iter()
+                    .map(|command| {
+                        format!(
+                            "▫️ <code>{}{}</code>",
+                            escape_html(&prefix),
+                            escape_html(command)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 message
-                    .reply_html(format!(
-                        "⚡️ <b>Nickname-exempt commands</b>\n{}",
-                        if commands.is_empty() {
-                            "▫️ None".to_owned()
-                        } else {
-                            commands
-                                .iter()
-                                .map(|command| format!("▪️ <code>.{}</code>", escape_html(command)))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
-                    ))
+                    .reply_html(ctx.tf("settings.cmd_nn_list", &[&lines]))
                     .await?;
                 Ok(())
             }
@@ -190,93 +212,193 @@ impl HerokuSettingsMod {
     }
 
     async fn watchers(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
-        let mut lines = vec!["👁 <b>Watchers</b>".to_owned()];
         let disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
+        let mut lines = Vec::new();
         for module in ctx
             .modules
             .all()
             .iter()
             .filter(|module| module.has_watcher())
         {
-            let state = if disabled.contains_key(module.name()) {
-                "🚫"
-            } else {
-                "✅"
-            };
-            lines.push(format!(
-                "{state} <code>{}</code>",
-                escape_html(module.name())
-            ));
+            if !disabled.contains_key(module.name()) {
+                lines.push(format!("♻️ {}", escape_html(module.name())));
+            }
         }
-        message.reply_html(lines.join("\n")).await?;
+        for (name, rules) in &disabled {
+            lines.push(format!("💢 {} {}", escape_html(name), rules));
+        }
+        if lines.is_empty() {
+            message.reply_html(ctx.tr("settings.nothing")).await?;
+            return Ok(());
+        }
+        message
+            .reply_html(ctx.tf("settings.watchers_list", &[&lines.join("\n")]))
+            .await?;
         Ok(())
     }
 
     async fn toggle_watcher(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
         let Some(name) = args.get(0) else {
-            message.reply_html(ctx.tr("common.no_args")).await?;
+            message.reply_html(ctx.tr("settings.watcher_args")).await?;
             return Ok(());
         };
         let Some(module) = ctx.modules.get(name) else {
             message
-                .reply_html(ctx.tr("settings.module_not_found"))
+                .reply_html(ctx.tf("settings.watcher_404", &[&escape_html(name)]))
                 .await?;
             return Ok(());
         };
         if !module.has_watcher() {
             message
-                .reply_html(ctx.tr("settings.module_not_found"))
+                .reply_html(ctx.tf("settings.watcher_404", &[&escape_html(module.name())]))
                 .await?;
             return Ok(());
         }
+
+        let chats = args.flag("c");
+        let mut pm = args.flag("p");
+        let out = args.flag("o");
+        let mut incoming = args.flag("i");
+        if chats && pm {
+            pm = false;
+        }
+        if out && incoming {
+            incoming = false;
+        }
+
         let mut disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
-        let enabled = if disabled.remove(module.name()).is_some() {
-            true
-        } else {
-            disabled.insert(module.name().to_owned(), Value::Array(vec!["*".into()]));
-            false
-        };
+        if chats || pm || out || incoming {
+            let mut rules = Vec::new();
+            if chats {
+                rules.push(Value::from("only_chats"));
+            }
+            if pm {
+                rules.push(Value::from("only_pm"));
+            }
+            if out {
+                rules.push(Value::from("out"));
+            }
+            if incoming {
+                rules.push(Value::from("in"));
+            }
+            disabled.insert(module.name().to_owned(), Value::Array(rules.clone()));
+            ctx.db
+                .set("heroku.main", "disabled_watchers", Value::Object(disabled));
+            message
+                .reply_html(format!(
+                    "{} (<code>{}</code>)",
+                    ctx.tf("settings.watcher_enabled", &[&escape_html(module.name())]),
+                    Value::Array(rules)
+                ))
+                .await?;
+            return Ok(());
+        }
+
+        let globally_disabled = disabled
+            .get(module.name())
+            .and_then(Value::as_array)
+            .is_some_and(|rules| rules.iter().any(|rule| rule.as_str() == Some("*")));
+        if globally_disabled {
+            disabled.remove(module.name());
+            ctx.db
+                .set("heroku.main", "disabled_watchers", Value::Object(disabled));
+            message
+                .reply_html(ctx.tf("settings.watcher_enabled", &[&escape_html(module.name())]))
+                .await?;
+            return Ok(());
+        }
+
+        disabled.insert(
+            module.name().to_owned(),
+            Value::Array(vec![Value::from("*")]),
+        );
         ctx.db
             .set("heroku.main", "disabled_watchers", Value::Object(disabled));
         message
-            .reply_html(ctx.tf(
-                if enabled {
-                    "settings.toggled_on"
-                } else {
-                    "settings.toggled_off"
-                },
-                &[&escape_html(module.name())],
-            ))
+            .reply_html(ctx.tf("settings.watcher_disabled", &[&escape_html(module.name())]))
             .await?;
         Ok(())
     }
 
-    async fn watcher_blacklist(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
-        let disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
-        if disabled.is_empty() {
-            message.reply_html("▫️ <b>No disabled watchers</b>").await?;
-            return Ok(());
-        }
-        let lines = disabled
-            .iter()
-            .map(|(name, rules)| format!("🚫 <code>{}</code> — {}", escape_html(name), rules))
-            .collect::<Vec<_>>()
-            .join("\n");
-        message
-            .reply_html(format!("👁 <b>Disabled watchers</b>\n{lines}"))
-            .await?;
-        Ok(())
-    }
-
-    async fn nonick_user(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
-        let Some(user) = ctx
-            .target_user(message, args.raw.trim())
-            .await
-            .map(|peer| super::common::peer_id(&peer))
-        else {
-            message.reply_html(ctx.tr("common.who")).await?;
+    async fn watcher_blacklist(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
+        let Some(name) = args.get(0) else {
+            message.reply_html(ctx.tr("settings.watcher_args")).await?;
             return Ok(());
         };
+        let Some(module) = ctx.modules.get(name) else {
+            message
+                .reply_html(ctx.tf("settings.watcher_404", &[&escape_html(name)]))
+                .await?;
+            return Ok(());
+        };
+        if !module.has_watcher() {
+            message
+                .reply_html(ctx.tf("settings.watcher_404", &[&escape_html(module.name())]))
+                .await?;
+            return Ok(());
+        }
+        let chat = message.chat_id();
+        let mut disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
+        let mut rules = disabled
+            .get(module.name())
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let present = rules.iter().any(|rule| {
+            rule.as_i64() == Some(chat) || rule.as_str().is_some_and(|v| v == chat.to_string())
+        });
+        if present {
+            rules.retain(|rule| {
+                rule.as_i64() != Some(chat) && rule.as_str().is_none_or(|v| v != chat.to_string())
+            });
+            if rules.is_empty() {
+                disabled.remove(module.name());
+            } else {
+                disabled.insert(module.name().to_owned(), Value::Array(rules));
+            }
+            ctx.db
+                .set("heroku.main", "disabled_watchers", Value::Object(disabled));
+            message
+                .reply_html(format!(
+                    "{} <b>in current chat</b>",
+                    ctx.tf("settings.watcher_enabled", &[&escape_html(module.name())])
+                ))
+                .await?;
+        } else {
+            rules.push(Value::from(chat));
+            disabled.insert(module.name().to_owned(), Value::Array(rules));
+            ctx.db
+                .set("heroku.main", "disabled_watchers", Value::Object(disabled));
+            message
+                .reply_html(format!(
+                    "{} <b>in current chat</b>",
+                    ctx.tf("settings.watcher_disabled", &[&escape_html(module.name())])
+                ))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn nonick_user(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+        let Some(reply) = message.get_reply().await? else {
+            message
+                .reply_html(ctx.tr("settings.reply_required"))
+                .await?;
+            return Ok(());
+        };
+        let Some(peer_id) = reply.inner.sender_id() else {
+            message
+                .reply_html(ctx.tr("settings.reply_required"))
+                .await?;
+            return Ok(());
+        };
+        let Some(peer) = ctx.resolve_peer_ref(peer_id).await else {
+            message
+                .reply_html(ctx.tr("settings.reply_required"))
+                .await?;
+            return Ok(());
+        };
+        let user = super::common::peer_id(&peer);
         let mut users = ctx.db.get_i64_list("heroku.main", "nonickusers");
         let enabled = if let Some(index) = users.iter().position(|id| *id == user) {
             users.remove(index);
@@ -291,19 +413,18 @@ impl HerokuSettingsMod {
             Value::Array(users.into_iter().map(Value::from).collect()),
         );
         message
-            .reply_html(ctx.tf(
-                if enabled {
-                    "settings.toggled_on"
-                } else {
-                    "settings.toggled_off"
-                },
-                &[&user.to_string()],
-            ))
+            .reply_html(ctx.tf("settings.user_nn", &[if enabled { "on" } else { "off" }]))
             .await?;
         Ok(())
     }
 
     async fn nonick_chat(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+        if message.is_private() {
+            message
+                .reply_html(ctx.tr("settings.private_not_allowed"))
+                .await?;
+            return Ok(());
+        }
         let chat_id = message.chat_id();
         let mut chats = ctx.db.get_i64_list("heroku.main", "nonickchats");
         let enabled = if let Some(index) = chats.iter().position(|id| *id == chat_id) {
@@ -320,12 +441,11 @@ impl HerokuSettingsMod {
         );
         message
             .reply_html(ctx.tf(
-                if enabled {
-                    "settings.toggled_on"
-                } else {
-                    "settings.toggled_off"
-                },
-                &[&chat_id.to_string()],
+                "settings.cmd_nn",
+                &[
+                    &escape_html(&message.chat_display()),
+                    if enabled { "on" } else { "off" },
+                ],
             ))
             .await?;
         Ok(())
@@ -333,10 +453,14 @@ impl HerokuSettingsMod {
 
     async fn nonick_command(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
         let Some(name) = args.get(0) else {
-            message.reply_html(ctx.tr("common.no_args")).await?;
+            message.reply_html(ctx.tr("settings.no_cmd")).await?;
             return Ok(());
         };
         let name = name.trim_start_matches('.');
+        if ctx.modules.find_command(name).into_iter().next().is_none() {
+            message.reply_html(ctx.tr("settings.cmd404")).await?;
+            return Ok(());
+        }
         let mut commands = ctx.db.get_string_list("heroku.main", "nonickcmds");
         let enabled = if let Some(index) = commands
             .iter()
@@ -353,14 +477,18 @@ impl HerokuSettingsMod {
             "nonickcmds",
             Value::Array(commands.into_iter().map(Value::String).collect()),
         );
+        let prefix = ctx
+            .prefixes(ctx.me_id)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ".".to_owned());
         message
             .reply_html(ctx.tf(
-                if enabled {
-                    "settings.toggled_on"
-                } else {
-                    "settings.toggled_off"
-                },
-                &[&escape_html(name)],
+                "settings.cmd_nn",
+                &[
+                    &escape_html(&format!("{prefix}{name}")),
+                    if enabled { "on" } else { "off" },
+                ],
             ))
             .await?;
         Ok(())

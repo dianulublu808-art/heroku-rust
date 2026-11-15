@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use grammers_client::peer::Peer;
+use grammers_tl_types as tl;
+use rand::Rng;
 use regex::Regex;
 use serde_json::Value;
 
@@ -203,27 +206,14 @@ impl InlineStuff {
     }
 
     async fn set_username(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
-        let raw = args.raw.trim().trim_start_matches('@');
+        let mut raw = args.raw.trim().trim_start_matches('@').to_owned();
         if raw.is_empty() {
-            let current = ctx
-                .db
-                .get_str(INLINE_NS, "bot_username", "")
-                .trim()
-                .to_owned();
-            let current = if current.is_empty() {
-                ctx.inline.bot_username().await.unwrap_or_default()
-            } else {
-                current
-            };
-            let mut out = if current.is_empty() {
-                ctx.tr("inline.bot_username_none")
-            } else {
-                ctx.tf("inline.bot_username_current", &[&escape_html(&current)])
-            };
-            out.push_str("\n\n");
-            out.push_str(&ctx.tr("inline.bot_username_help"));
-            message.reply_html(out).await?;
-            return Ok(());
+            // Python generates a free-looking bot username when none is given.
+            raw = format!(
+                "{}_{}_bot",
+                latin_word(),
+                rand::thread_rng().gen_range(1_000_000..10_000_000)
+            );
         }
 
         if raw.len() <= 4
@@ -238,19 +228,28 @@ impl InlineStuff {
             return Ok(());
         }
 
-        if ctx.resolve(raw).await.is_some() {
-            message
-                .reply_html(ctx.tr("inline.bot_username_occupied"))
-                .await?;
-            return Ok(());
+        if let Some(peer) = ctx.client.resolve_username(&raw).await.ok().flatten() {
+            let is_bot = match peer {
+                Peer::User(user) => match user.raw {
+                    tl::enums::User::User(raw) => raw.bot,
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !is_bot {
+                message
+                    .reply_html(ctx.tr("inline.bot_username_occupied"))
+                    .await?;
+                return Ok(());
+            }
         }
 
         ctx.db
-            .set(INLINE_NS, "custom_bot", Value::String(raw.to_owned()));
+            .set(INLINE_NS, "custom_bot", Value::String(raw.clone()));
         ctx.db.remove(INLINE_NS, "bot_token");
         ctx.inline.stop().await;
         message
-            .reply_html(ctx.tf("inline.bot_updated", &[&escape_html(raw)]))
+            .reply_html(ctx.tf("inline.bot_updated", &[&escape_html(&raw)]))
             .await?;
         Ok(())
     }
@@ -352,6 +351,160 @@ fn prefix(ctx: &Ctx) -> String {
     } else {
         prefix
     }
+}
+
+fn latin_word() -> &'static str {
+    const WORDS: &[&str] = &[
+        "Amor",
+        "Arbor",
+        "Astra",
+        "Aurum",
+        "Bellum",
+        "Caelum",
+        "Calor",
+        "Candor",
+        "Carpe",
+        "Celer",
+        "Certo",
+        "Cibus",
+        "Civis",
+        "Clemens",
+        "Coetus",
+        "Cogito",
+        "Conexus",
+        "Consilium",
+        "Cresco",
+        "Cura",
+        "Cursus",
+        "Decus",
+        "Deus",
+        "Dies",
+        "Digitus",
+        "Discipulus",
+        "Dominus",
+        "Donum",
+        "Dux",
+        "Faber",
+        "Fama",
+        "Fatum",
+        "Felis",
+        "Fides",
+        "Finis",
+        "Flamma",
+        "Forma",
+        "Fortuna",
+        "Frater",
+        "Fructus",
+        "Fuga",
+        "Gaudium",
+        "Gens",
+        "Gloria",
+        "Gratia",
+        "Habitus",
+        "Hora",
+        "Ignis",
+        "Imago",
+        "Imperium",
+        "Indus",
+        "Ingenium",
+        "Initium",
+        "Ipsum",
+        "Iter",
+        "Ius",
+        "Labor",
+        "Lapis",
+        "Laus",
+        "Lex",
+        "Liber",
+        "Limes",
+        "Lingua",
+        "Locus",
+        "Lumen",
+        "Luna",
+        "Lux",
+        "Magister",
+        "Manus",
+        "Mare",
+        "Mater",
+        "Medicus",
+        "Mens",
+        "Miles",
+        "Mira",
+        "Modus",
+        "Mons",
+        "Mors",
+        "Motus",
+        "Mundus",
+        "Natura",
+        "Navis",
+        "Nexus",
+        "Nomen",
+        "Nox",
+        "Nubes",
+        "Numerus",
+        "Nuntius",
+        "Oculus",
+        "Opus",
+        "Ordo",
+        "Origo",
+        "Pax",
+        "Pectus",
+        "Pes",
+        "Pictor",
+        "Pietas",
+        "Piscis",
+        "Pluma",
+        "Populus",
+        "Porta",
+        "Pretium",
+        "Primus",
+        "Princeps",
+        "Proelium",
+        "Puer",
+        "Pulvis",
+        "Quaestio",
+        "Regnum",
+        "Rex",
+        "Ripa",
+        "Rosa",
+        "Rumor",
+        "Salus",
+        "Sapientia",
+        "Scientia",
+        "Scriptor",
+        "Sedes",
+        "Semita",
+        "Senex",
+        "Sensus",
+        "Silva",
+        "Sol",
+        "Somnus",
+        "Soror",
+        "Spes",
+        "Stella",
+        "Studium",
+        "Tempus",
+        "Terra",
+        "Testis",
+        "Timor",
+        "Toga",
+        "Terra",
+        "Umbra",
+        "Unitas",
+        "Urbs",
+        "Vallis",
+        "Veritas",
+        "Verbum",
+        "Vesta",
+        "Via",
+        "Victoria",
+        "Vinum",
+        "Vir",
+        "Virtus",
+        "Vita",
+        "Vox",
+    ];
+    WORDS[rand::thread_rng().gen_range(0..WORDS.len())]
 }
 
 fn format_duration(duration: std::time::Duration) -> String {
