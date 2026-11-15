@@ -120,6 +120,233 @@ pub async fn interactive_login(
     }
 }
 
+/// Sign in by scanning a QR code from an already authorised Telegram app.
+///
+/// Mirrors Python's `qr_login`: export a login token, render it as a QR code,
+/// poll `auth.importLoginToken` and recreate the token when it expires. Works
+/// without a phone number, which makes it handy on a headless Termux setup.
+pub async fn qr_login(
+    client: &Client,
+    session: &Arc<ErasedSession>,
+    config: &Config,
+) -> Result<()> {
+    let lang = config.lang.as_str();
+
+    println!("\n{}\n", l(lang, "🔐 QR code login", "🔐 Вход по QR-коду"));
+    println!(
+        "{}",
+        l(
+            lang,
+            "Open Telegram → Settings → Devices → Link Desktop Device, then scan the code below.",
+            "Открой Telegram → Настройки → Устройства → Подключить устройство по QR-коду и отсканируй код ниже."
+        )
+    );
+
+    loop {
+        let exported = client
+            .invoke(&tl::functions::auth::ExportLoginToken {
+                api_id: config.api_id,
+                api_hash: config.api_hash.clone(),
+                except_ids: Vec::new(),
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("{}", describe_login_error(&err, lang)))?;
+
+        let token = match exported {
+            tl::enums::auth::LoginToken::Token(token) => token,
+            tl::enums::auth::LoginToken::MigrateTo(migrate) => {
+                // The account lives on another datacenter. Point the session at
+                // it and export a fresh token there, like official clients do.
+                session
+                    .set_home_dc_id(migrate.dc_id)
+                    .await
+                    .map_err(|err| anyhow::anyhow!("failed to switch datacenter: {err}"))?;
+                continue;
+            }
+            tl::enums::auth::LoginToken::Success(success) => {
+                return finish_qr_login(success, client, session, lang).await;
+            }
+        };
+
+        let url = format!("tg://login?token={}", base64_url_nopad(&token.token));
+        render_qr(&url);
+        println!(
+            "\n{}\n{}\n",
+            l(
+                lang,
+                "Waiting for the QR code to be scanned…",
+                "Жду, пока отсканируют QR-код…"
+            ),
+            l(
+                lang,
+                "The code refreshes automatically. Press Ctrl+C to cancel.",
+                "Код обновляется автоматически. Нажми Ctrl+C, чтобы отменить."
+            )
+        );
+        println!(
+            "{} {url}\n",
+            l(lang, "Login link (copyable):", "Ссылка для входа:")
+        );
+
+        let expires = i64::from(token.expires);
+        loop {
+            if unix_now() + 1 >= expires {
+                println!(
+                    "{}",
+                    l(
+                        lang,
+                        "QR code expired, generating a new one…",
+                        "QR-код истёк, генерирую новый…"
+                    )
+                );
+                break;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            match client
+                .invoke(&tl::functions::auth::ImportLoginToken {
+                    token: token.token.clone(),
+                })
+                .await
+            {
+                Ok(tl::enums::auth::LoginToken::Token(_)) => continue,
+                Ok(tl::enums::auth::LoginToken::Success(success)) => {
+                    return finish_qr_login(success, client, session, lang).await;
+                }
+                Ok(tl::enums::auth::LoginToken::MigrateTo(migrate)) => {
+                    session
+                        .set_home_dc_id(migrate.dc_id)
+                        .await
+                        .map_err(|err| anyhow::anyhow!("failed to switch datacenter: {err}"))?;
+                    match client
+                        .invoke(&tl::functions::auth::ImportLoginToken {
+                            token: migrate.token,
+                        })
+                        .await
+                    {
+                        Ok(tl::enums::auth::LoginToken::Success(success)) => {
+                            return finish_qr_login(success, client, session, lang).await;
+                        }
+                        Ok(tl::enums::auth::LoginToken::Token(_)) => {
+                            break;
+                        }
+                        Ok(tl::enums::auth::LoginToken::MigrateTo(_)) => {
+                            bail!("Telegram asked to migrate datacenters more than once")
+                        }
+                        Err(err) => {
+                            bail!("{}", describe_login_error(&err, lang));
+                        }
+                    }
+                }
+                Err(err)
+                    if err.is("AUTH_TOKEN_EXPIRED")
+                        || err.is("AUTH_TOKEN_INVALID")
+                        || err.is("AUTH_TOKEN_ALREADY_ACCEPTED") =>
+                {
+                    break;
+                }
+                Err(err) => bail!("{}", describe_login_error(&err, lang)),
+            }
+        }
+    }
+}
+
+async fn finish_qr_login(
+    success: tl::types::auth::LoginTokenSuccess,
+    client: &Client,
+    session: &Arc<ErasedSession>,
+    lang: &str,
+) -> Result<()> {
+    match success.authorization {
+        tl::enums::auth::Authorization::Authorization(_) => {
+            finish_login(client, session).await?;
+            info!(
+                "{}",
+                l(lang, "Signed in successfully", "Вход выполнен успешно")
+            );
+            Ok(())
+        }
+        tl::enums::auth::Authorization::SignUpRequired(_) => bail!(
+            "{}",
+            l(
+                lang,
+                "this account still needs to sign up in the official Telegram app",
+                "этот аккаунт ещё должен зарегистрироваться в официальном приложении Telegram"
+            )
+        ),
+    }
+}
+
+/// URL-safe base64 without padding, as required by `tg://login?token=…`.
+fn base64_url_nopad(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(triple >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(triple >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[triple as usize & 63] as char);
+        }
+    }
+    out
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Print a compact Unicode QR code (two module rows per terminal line).
+fn render_qr(url: &str) {
+    use qrcodegen::{QrCode, QrCodeEcc};
+
+    let qr = match QrCode::encode_text(url, QrCodeEcc::Medium) {
+        Ok(qr) => qr,
+        Err(err) => {
+            println!("Could not build a QR code: {err}");
+            return;
+        }
+    };
+
+    let border = 2;
+    let size = qr.size();
+    let total = size + border * 2;
+    let dark = |x: i32, y: i32| {
+        x >= border
+            && y >= border
+            && x < size + border
+            && y < size + border
+            && qr.get_module(x - border, y - border)
+    };
+
+    // Clear the screen and move the cursor to the top-left corner.
+    print!("\x1b[2J\x1b[3;1f");
+    for y in (0..total).step_by(2) {
+        let mut line = String::with_capacity(total as usize);
+        for x in 0..total {
+            let top = dark(x, y);
+            let bottom = dark(x, y + 1);
+            line.push(match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
+        }
+        println!("{line}");
+    }
+}
+
 /// Validate and canonicalise a phone number: `+<country><number>` with digits
 /// only. Spaces, dashes, dots and parentheses are accepted and stripped.
 pub fn normalize_phone(raw: &str) -> Result<String> {
@@ -173,7 +400,7 @@ fn resolve_phone(config: &Config) -> Result<String> {
     normalize_phone(&raw).with_context(|| format!("invalid phone number {raw:?}"))
 }
 
-async fn send_code(
+pub(crate) async fn send_code(
     client: &Client,
     phone: &str,
     api_id: i32,
@@ -205,7 +432,7 @@ async fn send_code(
     unpack_sent_code(result)
 }
 
-async fn resend_code(
+pub(crate) async fn resend_code(
     client: &Client,
     phone: &str,
     phone_code_hash: &str,
@@ -456,6 +683,58 @@ async fn finish_login(client: &Client, session: &Arc<ErasedSession>) -> Result<(
     Ok(())
 }
 
+pub(crate) fn delivery_hint(
+    kind: &tl::enums::auth::SentCodeType,
+    phone: &str,
+    lang: &str,
+) -> String {
+    describe_delivery(kind, phone, lang)
+}
+
+/// Outcome of submitting a login code for an additional account.
+pub(crate) enum CodeOutcome {
+    SignedIn,
+    PasswordRequired,
+}
+
+pub(crate) async fn account_sign_in(
+    client: &Client,
+    session: &Arc<ErasedSession>,
+    phone: &str,
+    phone_code_hash: &str,
+    code: &str,
+) -> Result<CodeOutcome> {
+    match sign_in(client, session, phone, phone_code_hash, code, "en").await {
+        Ok(()) => Ok(CodeOutcome::SignedIn),
+        Err(LoginFailure::PasswordRequired) => Ok(CodeOutcome::PasswordRequired),
+        Err(LoginFailure::InvalidCode) => bail!("PHONE_CODE_INVALID"),
+        Err(LoginFailure::Expired) => bail!("PHONE_CODE_EXPIRED"),
+        Err(LoginFailure::SignUpRequired) => {
+            bail!("this phone number has no Telegram account")
+        }
+        Err(LoginFailure::Other(err)) => bail!("{err}"),
+    }
+}
+
+pub(crate) async fn account_check_password(
+    client: &Client,
+    session: &Arc<ErasedSession>,
+    password: &str,
+) -> Result<()> {
+    let info: tl::types::account::Password = client
+        .invoke(&tl::functions::account::GetPassword {})
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to fetch 2FA information: {err}"))?
+        .into();
+
+    client
+        .check_password(PasswordToken::new(info), password.to_owned())
+        .await
+        .map_err(|err| anyhow::anyhow!("two-factor authentication failed: {err}"))?;
+
+    finish_login(client, session).await
+}
+
 fn print_delivery(sent: &tl::types::auth::SentCode, phone: &str, lang: &str) {
     println!("{}", describe_delivery(&sent.r#type, phone, lang));
     if let Some(timeout) = sent.timeout {
@@ -566,6 +845,18 @@ mod tests {
         assert!(normalize_phone("+7abc").is_err());
         assert!(normalize_phone("+123").is_err());
         assert!(normalize_phone("").is_err());
+    }
+
+    #[test]
+    fn encodes_base64url_without_padding() {
+        assert_eq!(base64_url_nopad(b""), "");
+        assert_eq!(base64_url_nopad(b"f"), "Zg");
+        assert_eq!(base64_url_nopad(b"fo"), "Zm8");
+        assert_eq!(base64_url_nopad(b"foo"), "Zm9v");
+        assert_eq!(base64_url_nopad(b"foob"), "Zm9vYg");
+        assert_eq!(base64_url_nopad(b"fooba"), "Zm9vYmE");
+        assert_eq!(base64_url_nopad(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_url_nopad(&[0xfb, 0xff]), "-_8");
     }
 
     #[test]

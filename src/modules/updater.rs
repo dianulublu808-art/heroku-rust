@@ -1,18 +1,28 @@
 // ©️ Heroku Userbot — Rust rewrite
 // Licensed under the GNU AGPLv3. See LICENSE.
 
-//! Updater commands. The Rust build ships as a single binary, so self-updates
-//! are performed by replacing the binary instead of pulling Python modules.
+//! Updater commands: git status, pull, changelog, rollback, restart and the
+//! background update poller.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use grammers_client::message::Button;
 
 use crate::args::Args;
 use crate::ctx::Ctx;
 use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
-use crate::tg::Msg;
+use crate::tg::{escape_html, Msg};
+
+const DEFAULT_ORIGIN: &str = "https://github.com/dianulublu808-art/heroku-rust";
+const FETCH_INTERVAL: Duration = Duration::from_secs(300);
+const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+static UPDATING: AtomicBool = AtomicBool::new(false);
 
 pub struct UpdaterMod;
 
@@ -28,23 +38,69 @@ impl Module for UpdaterMod {
 
     fn commands(&self) -> Vec<CommandDef> {
         vec![
-            CommandDef::new("update", "Check for updates"),
+            CommandDef::new("update", "Fetch and install the latest version").usage("[-f]"),
             CommandDef::new("restart", "Restart the userbot").usage("[-f]"),
-            CommandDef::new("autoupdate", "Toggle automatic updates").usage("[on|off]"),
+            CommandDef::new("autoupdate", "Toggle automatic update checks").usage("[on|off]"),
             CommandDef::new("source", "Show the source repository"),
-            CommandDef::new("changelog", "Show the changelog"),
-            CommandDef::new("rollback", "Roll back to the previous version"),
+            CommandDef::new("changelog", "Show recent commits"),
+            CommandDef::new("rollback", "Reset to an older commit").usage("<hash|number> [-b]"),
             CommandDef::new("ubstop", "Stop the userbot"),
         ]
     }
 
     fn config_spec(&self) -> Vec<ConfigSpec> {
-        vec![ConfigSpec::new(
-            "autoupdate",
-            "Automatically check for updates",
-            ConfigDefault::Bool(false),
-            ConfigKind::Bool,
-        )]
+        vec![
+            ConfigSpec::new(
+                "autoupdate",
+                "Automatically check for updates",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "GIT_ORIGIN_URL",
+                "Git repository URL",
+                ConfigDefault::Text(DEFAULT_ORIGIN),
+                ConfigKind::Text,
+            ),
+        ]
+    }
+
+    async fn on_load(&self, ctx: &Arc<Ctx>) -> Result<()> {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(FETCH_INTERVAL);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if !ctx.db.get_bool("UpdaterMod", "autoupdate", false) {
+                    continue;
+                }
+                let Some(root) = repo_root() else {
+                    continue;
+                };
+                match update_status(&root).await {
+                    Ok(status) if status.behind > 0 => {
+                        let last = ctx.db.get_str("UpdaterMod", "last_notified", "");
+                        if last == status.remote {
+                            continue;
+                        }
+                        ctx.db
+                            .set("UpdaterMod", "last_notified", status.remote.clone());
+                        let _ = ctx
+                            .send_self(ctx.tf(
+                                "updater.autoupdate_found",
+                                &[&status.behind.to_string(), &status.remote],
+                            ))
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::debug!("Autoupdate check failed: {err:#}");
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 
     async fn handle(
@@ -56,7 +112,12 @@ impl Module for UpdaterMod {
     ) -> Result<()> {
         match command {
             "source" => {
-                message.reply_html(ctx.tr("updater.source")).await?;
+                let origin = ctx
+                    .db
+                    .get_str("UpdaterMod", "GIT_ORIGIN_URL", DEFAULT_ORIGIN);
+                message
+                    .reply_html(ctx.tf("updater.source", &[&escape_html(&origin)]))
+                    .await?;
             }
             "autoupdate" => {
                 let current = ctx.db.get_bool("UpdaterMod", "autoupdate", false);
@@ -66,50 +127,514 @@ impl Module for UpdaterMod {
                     .unwrap_or(!current);
                 ctx.db.set("UpdaterMod", "autoupdate", value);
                 message
-                    .reply_html(format!(
-                        "{} <code>autoupdate</code> = <code>{value}</code>",
-                        if value { "✅" } else { "🚫" }
-                    ))
+                    .reply_html(if value {
+                        ctx.tr("updater.autoupdate_on")
+                    } else {
+                        ctx.tf("updater.autoupdate_off", &[&ctx.prefixes(ctx.me_id)[0]])
+                    })
                     .await?;
             }
-            "update" => {
-                message
-                    .reply_html(format!(
-                        "🪐 <b>Heroku {}</b>\n\n{}\n\n<i>{}</i>",
-                        crate::config::VERSION,
-                        ctx.tr("updater.up_to_date"),
-                        ctx.tr("updater.manual")
-                    ))
-                    .await?;
-            }
-            "changelog" => {
-                message
-                    .reply_html(
-                        "📜 <b>Changelog</b>\n\
-                         <a href=\"https://github.com/Heroku-userbot/Heroku/commits/master\">\
-                         GitHub commits</a>",
-                    )
-                    .await?;
-            }
+            "update" => self.update(ctx, message, args).await?,
+            "changelog" => self.changelog(ctx, message).await?,
+            "rollback" => self.rollback(ctx, message, args).await?,
             "restart" => {
-                message.reply_html(ctx.tr("updater.restarting")).await?;
-                // Restarting would kill the current process. On VDS installs the
-                // service manager restarts it for us, so exiting is the closest
-                // safe equivalent.
-                if args.flag("f") || args.flag("force") {
-                    tokio::spawn(async {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        std::process::exit(0);
-                    });
+                if !args.flag("f") && !args.flag("force") && confirm_card(ctx, "restart").await {
+                    message.reply_html(ctx.tr("updater.confirm_sent")).await?;
+                    return Ok(());
                 }
+                message.reply_html(ctx.tr("updater.restarting")).await?;
+                ctx.db.save();
+                tokio::spawn(async {
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    if let Err(err) = crate::inline::restart_process() {
+                        tracing::error!("Process restart failed: {err}");
+                        std::process::exit(0);
+                    }
+                });
             }
-            "rollback" | "ubstop" => {
-                message.reply_html(ctx.tr("updater.manual")).await?;
+            "ubstop" => {
+                if !args.flag("f") && !args.flag("force") && confirm_card(ctx, "stop").await {
+                    message.reply_html(ctx.tr("updater.confirm_sent")).await?;
+                    return Ok(());
+                }
+                message.reply_html(ctx.tr("updater.stopped")).await?;
+                ctx.db.save();
+                tokio::spawn(async {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    std::process::exit(0);
+                });
             }
             _ => {}
         }
         Ok(())
     }
+}
+
+impl UpdaterMod {
+    async fn update(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
+        let Some(root) = repo_root() else {
+            message.reply_html(ctx.tr("updater.no_repo")).await?;
+            return Ok(());
+        };
+        let force = args.flag("f") || args.flag("force");
+
+        message.reply_html(ctx.tr("updater.fetching")).await?;
+        let status = match update_status(&root).await {
+            Ok(status) => status,
+            Err(err) => {
+                message
+                    .reply_html(ctx.tf(
+                        "updater.update_failed",
+                        &[&escape_html(&format!("{err:#}"))],
+                    ))
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        if status.behind == 0 {
+            message.reply_html(ctx.tr("updater.up_to_date")).await?;
+            return Ok(());
+        }
+
+        let commits = format_commits(ctx, &status);
+        if !force {
+            let html = format!("{commits}\n\n{}", ctx.tr("updater.confirm_inline"));
+            let sent = ctx
+                .inline
+                .send_to_user(
+                    ctx,
+                    ctx.me_id,
+                    html,
+                    vec![vec![
+                        Button::data(ctx.tr("updater.btn_update"), b"heroku:upd:apply".to_vec()),
+                        Button::data(ctx.tr("updater.btn_cancel"), b"heroku:close".to_vec()),
+                    ]],
+                )
+                .await
+                .is_ok();
+            if sent {
+                message.reply_html(ctx.tr("updater.confirm_sent")).await?;
+            } else {
+                message
+                    .reply_html(format!(
+                        "{commits}\n\n{}",
+                        ctx.tf("updater.confirm", &[&ctx.prefixes(ctx.me_id)[0]])
+                    ))
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        if UPDATING.swap(true, Ordering::SeqCst) {
+            message.reply_html(ctx.tr("updater.busy")).await?;
+            return Ok(());
+        }
+
+        message
+            .reply_html(format!("{commits}\n\n{}", ctx.tr("updater.updating")))
+            .await?;
+
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let result = apply_update(&ctx, &root).await;
+            UPDATING.store(false, Ordering::SeqCst);
+            match result {
+                Ok(()) => {
+                    let _ = ctx.send_self(ctx.tr("updater.updated")).await;
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    if let Err(err) = crate::inline::restart_process() {
+                        tracing::error!("Restart after update failed: {err}");
+                    }
+                }
+                Err(err) => {
+                    let _ = ctx
+                        .send_self(ctx.tf(
+                            "updater.update_failed",
+                            &[&escape_html(&format!("{err:#}"))],
+                        ))
+                        .await;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn changelog(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+        let Some(root) = repo_root() else {
+            message.reply_html(ctx.tr("updater.no_repo")).await?;
+            return Ok(());
+        };
+        let log = git(&root, &["log", "--pretty=format:%h%x09%s", "-n", "20"]).await?;
+        let mut lines = vec![ctx.tr("updater.changelog_title")];
+        for line in log.lines() {
+            if let Some((hash, subject)) = line.split_once('\t') {
+                lines.push(format!(
+                    "▪️ <code>{}</code> {}",
+                    escape_html(hash),
+                    escape_html(subject)
+                ));
+            }
+        }
+        message.reply_html(lines.join("\n")).await?;
+        Ok(())
+    }
+
+    async fn rollback(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
+        let Some(root) = repo_root() else {
+            message.reply_html(ctx.tr("updater.no_repo")).await?;
+            return Ok(());
+        };
+
+        let log = git(
+            &root,
+            &["log", "--pretty=format:%H%x09%h%x09%s", "-n", "10"],
+        )
+        .await?;
+        let entries: Vec<(&str, &str, &str)> = log
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, '\t');
+                Some((parts.next()?, parts.next()?, parts.next()?))
+            })
+            .collect();
+
+        let Some(selector) = args.get(0) else {
+            let mut lines = vec![ctx.tr("updater.rollback_title")];
+            for (index, (_, short, subject)) in entries.iter().enumerate() {
+                lines.push(format!(
+                    "<code>{}</code>. <code>{}</code> {}",
+                    index + 1,
+                    escape_html(short),
+                    escape_html(subject)
+                ));
+            }
+            lines.push(String::new());
+            lines.push(ctx.tr("updater.rollback_inline"));
+
+            let mut rows = Vec::new();
+            for (hash, short, subject) in entries.iter().take(6) {
+                rows.push(vec![
+                    Button::data(
+                        format!("↩️ {} {}", short, truncate(subject, 28)),
+                        format!("heroku:upd:rb:{hash}").into_bytes(),
+                    ),
+                    Button::data("🔨", format!("heroku:upd:rbb:{hash}").into_bytes()),
+                ]);
+            }
+            rows.push(vec![Button::data(
+                ctx.tr("updater.btn_cancel"),
+                b"heroku:close".to_vec(),
+            )]);
+
+            let sent = ctx
+                .inline
+                .send_to_user(ctx, ctx.me_id, lines.join("\n"), rows)
+                .await
+                .is_ok();
+            if !sent {
+                message
+                    .reply_html(ctx.tf("updater.rollback_usage", &[&ctx.prefixes(ctx.me_id)[0]]))
+                    .await?;
+            } else {
+                message.reply_html(ctx.tr("updater.confirm_sent")).await?;
+            }
+            return Ok(());
+        };
+
+        let target = if let Ok(index) = selector.parse::<usize>() {
+            entries
+                .get(index.saturating_sub(1))
+                .map(|(hash, _, _)| (*hash).to_owned())
+                .with_context(|| format!("no commit at position {index}"))?
+        } else {
+            selector.to_owned()
+        };
+
+        let reset = git(&root, &["reset", "--hard", &target]).await;
+        if let Err(err) = reset {
+            message
+                .reply_html(ctx.tf(
+                    "updater.update_failed",
+                    &[&escape_html(&format!("{err:#}"))],
+                ))
+                .await?;
+            return Ok(());
+        }
+
+        if args.flag("b") || args.flag("build") {
+            message.reply_html(ctx.tr("updater.building")).await?;
+            build_release(&root).await?;
+            message.reply_html(ctx.tr("updater.rolled_back")).await?;
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                if let Err(err) = crate::inline::restart_process() {
+                    tracing::error!("Restart after rollback failed: {err}");
+                }
+            });
+        } else {
+            message
+                .reply_html(ctx.tf("updater.rolled_back_hint", &[&ctx.prefixes(ctx.me_id)[0]]))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+struct UpdateStatus {
+    behind: usize,
+    remote: String,
+    branch: String,
+    commits: Vec<String>,
+}
+
+async fn update_status(root: &Path) -> Result<UpdateStatus> {
+    git(root, &["fetch", "--all", "--prune"]).await?;
+
+    let branch = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .unwrap_or_else(|_| "master".to_owned());
+    let branch = branch.trim().to_owned();
+    let upstream = git(
+        root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .await
+    .unwrap_or_else(|_| format!("origin/{branch}"));
+
+    let behind = git(root, &["rev-list", "--count", &format!("HEAD..{upstream}")])
+        .await?
+        .parse::<usize>()
+        .unwrap_or(0);
+    let remote = git(root, &["rev-parse", "--short", &upstream])
+        .await
+        .unwrap_or_default();
+    let log = git(
+        root,
+        &[
+            "log",
+            "--pretty=format:%h%x09%s",
+            "-n",
+            "10",
+            &format!("HEAD..{upstream}"),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let commits = log.lines().map(ToOwned::to_owned).collect();
+
+    Ok(UpdateStatus {
+        behind,
+        remote,
+        branch,
+        commits,
+    })
+}
+
+async fn apply_update(ctx: &Arc<Ctx>, root: &Path) -> Result<()> {
+    git(root, &["pull", "--ff-only"]).await?;
+    if root.join("Cargo.toml").exists() {
+        let _ = ctx.send_self(ctx.tr("updater.building")).await;
+        build_release(root).await?;
+    }
+    Ok(())
+}
+
+async fn build_release(root: &Path) -> Result<()> {
+    let output = tokio::time::timeout(
+        BUILD_TIMEOUT,
+        tokio::process::Command::new("cargo")
+            .args(["build", "--release"])
+            .current_dir(root)
+            .output(),
+    )
+    .await
+    .context("cargo build timed out")?
+    .context("failed to start cargo (is Rust installed?)")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: String = stderr.lines().rev().take(12).collect::<Vec<_>>().join("\n");
+        bail!("cargo build --release failed:\n{tail}");
+    }
+    Ok(())
+}
+
+async fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(120),
+        tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
+            .output(),
+    )
+    .await
+    .context("git command timed out")?
+    .context("failed to start git")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git {} failed: {}", args.join(" "), stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn repo_root() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("HEROKU_REPO") {
+        let path = PathBuf::from(root);
+        if path.join(".git").exists() {
+            return Some(path);
+        }
+    }
+
+    let mut starts = Vec::new();
+    if let Ok(current) = std::env::current_dir() {
+        starts.push(current);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            starts.push(parent.to_path_buf());
+        }
+    }
+
+    for start in starts {
+        for directory in start.ancestors() {
+            if directory.join(".git").exists() {
+                return Some(directory.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
+fn format_commits(ctx: &Ctx, status: &UpdateStatus) -> String {
+    let mut lines = vec![ctx.tf(
+        "updater.available",
+        &[
+            &status.behind.to_string(),
+            &escape_html(&status.branch),
+            &escape_html(&status.remote),
+        ],
+    )];
+    for commit in status.commits.iter().take(10) {
+        if let Some((hash, subject)) = commit.split_once('\t') {
+            lines.push(format!(
+                "▪️ <code>{}</code> {}",
+                escape_html(hash),
+                escape_html(subject)
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Ask for confirmation through the inline bot. Returns `false` (and lets the
+/// caller fall back to a text prompt) when the bot is not running or the owner
+/// has not started it.
+async fn confirm_card(ctx: &Arc<Ctx>, action: &str) -> bool {
+    let (text_key, callback) = match action {
+        "restart" => ("updater.confirm_restart", b"heroku:upd:restart".to_vec()),
+        "stop" => ("updater.confirm_stop", b"heroku:upd:stop".to_vec()),
+        _ => return false,
+    };
+    ctx.inline
+        .send_to_user(
+            ctx,
+            ctx.me_id,
+            ctx.tr(text_key).to_owned(),
+            vec![vec![
+                Button::data(ctx.tr("updater.btn_confirm"), callback),
+                Button::data(ctx.tr("updater.btn_cancel"), b"heroku:close".to_vec()),
+            ]],
+        )
+        .await
+        .is_ok()
+}
+
+/// Perform the complete update flow from an inline confirmation card.
+pub(crate) async fn inline_apply_update(ctx: Arc<Ctx>) {
+    let Some(root) = repo_root() else {
+        let _ = ctx.send_self(ctx.tr("updater.no_repo")).await;
+        return;
+    };
+    if UPDATING.swap(true, Ordering::SeqCst) {
+        let _ = ctx.send_self(ctx.tr("updater.busy")).await;
+        return;
+    }
+
+    let _ = ctx.send_self(ctx.tr("updater.fetching")).await;
+    let result = async {
+        let status = update_status(&root).await?;
+        if status.behind == 0 {
+            return Ok::<bool, anyhow::Error>(false);
+        }
+        let commits = format_commits(&ctx, &status);
+        let _ = ctx
+            .send_self(format!("{commits}\n\n{}", ctx.tr("updater.updating")))
+            .await;
+        apply_update(&ctx, &root).await?;
+        Ok(true)
+    }
+    .await;
+
+    UPDATING.store(false, Ordering::SeqCst);
+    match result {
+        Ok(true) => {
+            let _ = ctx.send_self(ctx.tr("updater.updated")).await;
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            if let Err(err) = crate::inline::restart_process() {
+                tracing::error!("Restart after inline update failed: {err}");
+            }
+        }
+        Ok(false) => {
+            let _ = ctx.send_self(ctx.tr("updater.up_to_date")).await;
+        }
+        Err(err) => {
+            let _ = ctx
+                .send_self(ctx.tf(
+                    "updater.update_failed",
+                    &[&escape_html(&format!("{err:#}"))],
+                ))
+                .await;
+        }
+    }
+}
+
+/// Reset the repository to a commit picked from the inline rollback card.
+pub(crate) async fn rollback_from_inline(ctx: &Arc<Ctx>, target: &str, build: bool) -> Result<()> {
+    let Some(root) = repo_root() else {
+        ctx.send_self(ctx.tr("updater.no_repo")).await?;
+        return Ok(());
+    };
+    git(&root, &["reset", "--hard", target]).await?;
+    if build {
+        let _ = ctx.send_self(ctx.tr("updater.building")).await;
+        build_release(&root).await?;
+        let _ = ctx.send_self(ctx.tr("updater.rolled_back")).await;
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            if let Err(err) = crate::inline::restart_process() {
+                tracing::error!("Restart after rollback failed: {err}");
+            }
+        });
+    } else {
+        let _ = ctx
+            .send_self(ctx.tf("updater.rolled_back_hint", &[&ctx.prefixes(ctx.me_id)[0]]))
+            .await;
+    }
+    Ok(())
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 inventory::submit! {

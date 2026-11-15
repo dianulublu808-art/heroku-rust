@@ -27,7 +27,8 @@ impl Module for Translations {
 
     fn commands(&self) -> Vec<CommandDef> {
         vec![
-            CommandDef::new("setlang", "Change the userbot language").usage("<en|ru>"),
+            CommandDef::new("setlang", "Change the userbot language")
+                .usage("<en|ru|uk|de|ja|leet|uwu|tiktok|neofit>"),
             CommandDef::new("dllangpack", "Manage language packs").usage("[language]"),
         ]
     }
@@ -43,7 +44,7 @@ impl Module for Translations {
             "setlang" => {
                 let lang = args
                     .get(0)
-                    .map(|raw| raw.to_lowercase())
+                    .map(crate::translations::canonical_lang)
                     .unwrap_or_default();
                 if lang.is_empty() {
                     message

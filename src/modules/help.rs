@@ -63,6 +63,12 @@ impl Module for Help {
 
 impl Help {
     async fn list(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+        // Prefer the interactive inline cover, exactly like Python's gallery.
+        let user_id = message.sender_id().unwrap_or(ctx.me_id);
+        if ctx.inline.send_help_page(ctx, user_id, 0).await.is_ok() {
+            return Ok(());
+        }
+
         let hidden = ctx.db.get_string_list("Help", "hide");
         let mut body = String::new();
         let mut shown = 0usize;
@@ -108,6 +114,16 @@ impl Help {
         let prefix = prefix(ctx, message);
 
         if let Some(module) = ctx.modules.get(query) {
+            let user_id = message.sender_id().unwrap_or(ctx.me_id);
+            if ctx
+                .inline
+                .send_help_module(ctx, user_id, module.name())
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+
             let commands = module.commands();
             let mut body = String::new();
             for command in commands {

@@ -29,6 +29,7 @@ impl Module for HerokuConfigMod {
     fn commands(&self) -> Vec<CommandDef> {
         vec![
             CommandDef::new("config", "Show or change module configuration")
+                .aliases(&["cfg", "fcfg"])
                 .aliases(&["cfg"])
                 .usage("[module] [key] [value]"),
         ]
@@ -42,6 +43,11 @@ impl Module for HerokuConfigMod {
         args: &Args,
     ) -> Result<()> {
         let Some(module_name) = args.get(0) else {
+            let user_id = message.sender_id().unwrap_or(ctx.me_id);
+            if ctx.inline.send_config_page(ctx, user_id).await.is_ok() {
+                return Ok(());
+            }
+
             let mut lines = vec!["⚙️ <b>Modules with configuration</b>".to_owned()];
             for module in ctx.modules.all() {
                 let specs = module.config_spec();
@@ -70,6 +76,16 @@ impl Module for HerokuConfigMod {
         }
 
         let Some(key) = args.get(1) else {
+            let user_id = message.sender_id().unwrap_or(ctx.me_id);
+            if ctx
+                .inline
+                .send_config_module(ctx, user_id, module.name())
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+
             let mut lines = vec![ctx.tf("config.title", &[&escape_html(module.name())])];
             for spec in &specs {
                 lines.push(format!(

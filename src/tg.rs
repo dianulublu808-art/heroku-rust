@@ -130,11 +130,13 @@ impl Msg {
     }
 
     pub async fn reply_html(&self, html: impl Into<String>) -> Result<Msg> {
+        crate::protection::guard().await;
         let message = InputMessage::new().html(html.into());
         Ok(Msg::new(self.inner.reply(message).await?))
     }
 
     pub async fn respond_html(&self, html: impl Into<String>) -> Result<Msg> {
+        crate::protection::guard().await;
         let message = InputMessage::new().html(html.into());
         Ok(Msg::new(self.inner.respond(message).await?))
     }
@@ -145,6 +147,7 @@ impl Msg {
         path: &Path,
         caption: impl Into<String>,
     ) -> Result<Msg> {
+        crate::protection::guard().await;
         let uploaded = client
             .upload_file(path)
             .await
@@ -154,6 +157,7 @@ impl Msg {
     }
 
     pub async fn edit_html(&self, html: impl Into<String>) -> Result<()> {
+        crate::protection::guard().await;
         self.inner
             .edit(InputMessage::new().html(html.into()))
             .await?;
@@ -161,6 +165,7 @@ impl Msg {
     }
 
     pub async fn delete(&self) -> Result<()> {
+        crate::protection::guard().await;
         self.inner.delete().await?;
         Ok(())
     }

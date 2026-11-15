@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::database::Database;
+use crate::inline::InlineManager;
 use crate::logbuf::LogBuffer;
 use crate::module::{
     Modules, ALL, GROUP_ADMIN, GROUP_ADMIN_ADD_ADMINS, GROUP_ADMIN_ANY, GROUP_MEMBER, GROUP_OWNER,
@@ -34,6 +35,7 @@ pub struct Ctx {
     pub security: Security,
     pub translator: Translator,
     pub log_buffer: LogBuffer,
+    pub inline: Arc<InlineManager>,
     pub started: Instant,
     pub me_id: i64,
     pub me_username: Option<String>,

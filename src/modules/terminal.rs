@@ -42,8 +42,12 @@ impl Module for TerminalMod {
 
     fn commands(&self) -> Vec<CommandDef> {
         vec![
-            CommandDef::new("terminal", "Execute a shell command").usage("<command>"),
-            CommandDef::new("terminate", "Stop a running command").usage("[-f]"),
+            CommandDef::new("terminal", "Execute a shell command")
+                .usage("<command>")
+                .aliases(&["exec"]),
+            CommandDef::new("terminate", "Stop a running command")
+                .usage("[-f]")
+                .aliases(&["kill"]),
         ]
     }
 

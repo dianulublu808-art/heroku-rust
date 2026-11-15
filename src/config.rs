@@ -69,6 +69,7 @@ pub struct Cli {
     pub wipe: bool,
     pub version: bool,
     pub no_git: bool,
+    pub qr: bool,
 }
 
 impl Cli {
@@ -88,6 +89,7 @@ impl Cli {
                 "-w" | "--wipe" => cli.wipe = true,
                 "-v" | "--version" => cli.version = true,
                 "--no-git" => cli.no_git = true,
+                "-q" | "--qr" => cli.qr = true,
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -106,6 +108,7 @@ fn print_help() {
          OPTIONS:\n\
          \x20   --data-root <PATH>   Directory with config, sessions and database\n\
          \x20   -w, --wipe            Delete config, sessions, database and modules\n\
+         \x20   -q, --qr              Sign in by scanning a QR code\n\
          \x20   --no-git              Do not use git for self-updates\n\
          \x20   -v, --version         Print version\n\
          \x20   -h, --help            Print this help\n"
@@ -300,14 +303,17 @@ pub fn wipe(data_root: &Path) -> Result<()> {
     for entry in fs::read_dir(data_root)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if (name.starts_with("config") || name.ends_with(".session") || name == "heroku.json")
+        if (name.starts_with("config")
+            || name.ends_with(".session")
+            || name == "heroku.json"
+            || name == "accounts.json")
             && entry.path().is_file()
         {
             fs::remove_file(entry.path())?;
             removed += 1;
         }
     }
-    for dir in ["sessions", "backups", "plugins"] {
+    for dir in ["sessions", "backups", "plugins", "accounts", "modules"] {
         let path = data_root.join(dir);
         if path.is_dir() {
             fs::remove_dir_all(path)?;

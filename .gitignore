@@ -4,6 +4,9 @@
 /sessions/
 /backups/
 /plugins/
+/modules/
+/accounts/
+/accounts.json
 *.session
 *.log
 .env

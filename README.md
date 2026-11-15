@@ -5,13 +5,13 @@ A Telegram MTProto **userbot** rewritten from the Python project
 
 The goal of this repository is a fast, single-binary userbot that keeps the
 familiar Heroku command surface, the same `heroku.json` database layout and the
-same permission bitmasks, while removing the Python runtime, virtualenv and
-runtime module loader.
+same permission bitmasks, while replacing the Python runtime and virtualenv with
+native Rust modules and keeping the module repository workflow.
 
-> **Status:** working core. The bot logs in, dispatches commands, enforces
-> permissions and ships the built-in modules listed below. Inline mode, the web
-> panel, multi-account switching and dynamic Python module loading are **not**
-> implemented yet (see [Roadmap](#roadmap)).
+> **Status:** working userbot with inline mode, multi-account switching, the
+> module repository loader, backups and local API flood protection. Python
+> modules themselves are still not executable inside the Rust binary (see
+> [Roadmap](#roadmap)).
 
 ---
 
@@ -30,6 +30,15 @@ runtime module loader.
   support, security groups, temporary rules (`tsec`) and per-command masks.
 - Built-in modules with configuration (`<module>.<key>` in the database) and
   language packs (`langpacks/en.yml`, `langpacks/ru.yml`).
+- Real inline bot: card, help, command search, profile and terminal-in-inline,
+  with callback buttons (restart, reset prefix, close) and bot PM commands.
+- Multi-account support: `.addacc` performs a real MTProto login (code + 2FA)
+  and `.switchacc` restarts the bot with another session/database.
+- Module repository workflow: `.addrepo`, `.delrepo`, `.dlmall`, `.ml`,
+  `.dlmod`, `.clearmodules` download real module files over HTTP(S), plus
+  `.backupmods` / `.restoremods` archives.
+- Local API flood protection with a sliding request window, freeze, owner
+  warning and `.suspend_api_protect`.
 - Graceful shutdown, colored logs kept in a ring buffer for `.logs`.
 
 ## Requirements
@@ -133,7 +142,10 @@ requesting another code. Repeated restarts do not speed this up.
 | `config.json` | API credentials and preferences |
 | `sessions/heroku.session` | SQLite MTProto session (keep private) |
 | `heroku.json` | Userbot database |
-| `backups/` | `.backupdb` output and restores |
+| `accounts/<id>/` | Session and database of an additional account |
+| `accounts.json` | Account registry and the active account |
+| `modules/` | Modules downloaded from repositories |
+| `backups/` | `.backupdb` / `.backupmods` output and restores |
 
 ### CLI
 
@@ -168,10 +180,13 @@ Run `.help` for the live list. Highlights:
 | Config | `.config`, `.setprefix`, `.aliases`, `.addalias`, `.delalias` |
 | Modules | `.togglemod`, `.togglecmd`, `.clearmodule`, `.blacklist`, `.unblacklist` |
 | Security | `.owneradd`, `.ownerrm`, `.ownerlist`, `.newsgroup`, `.sgroupadd`, `.sgrouprule`, `.security`, `.tsec` |
-| Backups | `.backupdb`, `.restoredb`, `.backupall`, `.restoreall`, `.set_backup_period` |
-| Tools | `.terminal`, `.e` / `.eval`, `.tr`, `.setlang`, `.dllangpack` |
+| Backups | `.backupdb`, `.restoredb`, `.backupall`, `.restoreall`, `.backupmods`, `.restoremods`, `.set_backup_period` |
+| Tools | `.terminal`, `.e` / `.eval`, `.ec`, `.ecpp`, `.ers`, `.eg`, `.enode`, `.tr`, `.setlang`, `.dllangpack` |
 | Updates | `.update`, `.restart`, `.autoupdate`, `.source`, `.changelog` |
-| Loader stubs | `.loadmod`, `.unloadmod`, `.listmods`, `.modinfo` (static build) |
+| Loader | `.ml`, `.dlmod`, `.loadmod`, `.unloadmod`, `.reloadmod`, `.loadall`, `.unloadall`, `.listmods`, `.modinfo`, `.addrepo`, `.delrepo`, `.dlmall`, `.clearmodules` |
+| Inline | `.inline`, `.inlinestatus`, `.ch_bot_token`, `.ch_heroku_bot`, `.inlinesec`, `.querysec` |
+| Accounts | `.addacc`, `.switchacc` |
+| Protection | `.api_fw_protection`, `.suspend_api_protect` |
 
 ## Modules
 
@@ -182,20 +197,20 @@ Run `.help` for the live list. Highlights:
 | `HerokuConfigMod` | `config` | Reads `config_spec()` of every module |
 | `HerokuSecurityMod` | owners, security groups, `security`, `tsec*` | Same bitmasks as Python |
 | `HerokuSettingsMod` | `settings`, `watchers`, `nonick*` | Global switches |
-| `HerokuBackupMod` | `backupdb`, `restoredb`, `set_backup_period` | Automatic backups |
+| `HerokuBackupMod` | `backupdb`, `restoredb`, `backupmods`, `restoremods`, `set_backup_period` | Database and module archives |
 | `HerokuInfoMod` | `info`, `ubinfo` | Version, uptime, platform |
 | `TestMod` | `ping`, `id`, `logs`, `clearlogs`, `suspend` | Self-testing |
 | `Translations` | `setlang`, `dllangpack` | Language packs |
 | `Translator` | `tr` | Google Translate backend |
 | `TerminalMod` | `terminal`, `terminate` | Shell with dangerous-command guard, 120 s timeout |
-| `Evaluator` | `e`, `eval`, `ec` | Rhai sandbox (no host access) |
+| `Evaluator` | `e`, `eval`, `ec`, `ecpp`, `ers`, `eg`, `enode` | Rhai sandbox + real C/C++/Rust/Go/Node runners (Go only when installed) |
 | `UpdaterMod` | `update`, `restart`, `autoupdate`, `source`, `changelog`, `rollback`, `ubstop` | Binary build: no self-update |
 | `Quickstart` | — | First-run welcome message |
-| `LoaderMod` | `listmods`, `modinfo`, load/unload stubs | Static build |
-| `LoaderRestrictor` | `allowmod`, `denymod`, `allowedmods` | Static build |
-| `InlineStuff` | `inline`, `inlinestatus` | Not implemented |
-| `HerokuWebMod` | `web`, `webbind`, `websecret` | Not implemented |
-| `APIRatelimiterMod` | `apilimiter` | Informational |
+| `LoaderMod` | `ml`, `dlmod`, `loadmod`, `unloadmod`, `listmods`, `modinfo`, `addrepo`, `delrepo`, `dlmall`, `clearmodules` | Real HTTP(S) repository downloads into `modules/` |
+| `LoaderRestrictor` | `allowmod`, `denymod`, `allowedmods` | Allow/deny list enforced by the loader |
+| `InlineStuff` | `inline`, `inlinestatus`, `ch_bot_token`, `ch_heroku_bot`, `inlinesec`, `querysec` | Real inline bot with callback buttons |
+| `HerokuAccounts` | `addacc`, `switchacc` | Multi-account login and restart-based switching |
+| `APIRatelimiterMod` | `api_fw_protection`, `suspend_api_protect` | Sliding-window flood guard with owner warning |
 
 ## Architecture
 
@@ -204,6 +219,7 @@ src/
   main.rs         entry point, banner, update loop, shutdown
   config.rs       config file, wizard, CLI, data layout
   login.rs        interactive login: delivery hints, resend, retries, 2FA
+  accounts.rs     multi-account registry and active session/database paths
   database.rs     thread-safe JSON database
   dispatcher.rs   prefix parsing, permissions, rate limit, watchers
   module.rs       Module trait, CommandDef, inventory-based registry
@@ -241,13 +257,11 @@ group_member=2048 pm=4096 everyone=8192
 ## Roadmap
 
 These parts of the Python project are intentionally **not** ported yet. The
-corresponding commands answer with an honest "not available in the Rust build"
-message instead of failing silently.
+corresponding commands answer with an honest message instead of failing
+silently.
 
-- [ ] Inline mode (`InlineStuff`, inline handlers, inline bot token)
-- [ ] Web panel (`HerokuWebMod`, FastAPI UI, web auth)
-- [ ] Multi-account switching and multiple sessions
-- [ ] Dynamic Python module loading / `dlmod` / module repository
+- [ ] Executing downloaded Python modules inside the Rust process (files are
+      downloaded, stored and backed up, but not imported)
 - [ ] Self-update from git (`updater` only reports status)
 - [ ] `terminate` process tracking (commands have a timeout instead)
 - [ ] Media-specific modules from the Python repo (notes, music, stickers, etc.)

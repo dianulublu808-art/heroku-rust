@@ -44,6 +44,27 @@ impl Security {
         self.db.get_i64_list(NS, "sudo")
     }
 
+    /// Every user that is allowed to use inline mode by default: owners, sudo,
+    /// security-group members and temporary user rules. This mirrors Heroku's
+    /// `security.all_users` cache.
+    pub fn all_users(&self) -> Vec<i64> {
+        let mut users = self.owners();
+        users.extend(self.sudo());
+        for group in self.sgroups().values() {
+            if let Some(members) = group.get("users").and_then(Value::as_array) {
+                users.extend(members.iter().filter_map(Value::as_i64));
+            }
+        }
+        for rule in self.db.get_array(NS, "tsec_user") {
+            if let Some(target) = rule.get("target").and_then(Value::as_i64) {
+                users.push(target);
+            }
+        }
+        users.sort_unstable();
+        users.dedup();
+        users
+    }
+
     pub fn is_owner(&self, user_id: i64) -> bool {
         self.owners().contains(&user_id)
     }

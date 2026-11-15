@@ -30,9 +30,27 @@ impl Module for Quickstart {
     }
 
     async fn on_load(&self, ctx: &Arc<Ctx>) -> Result<()> {
+        // Prepare the content channel and the Assets/Backups forum topics in the
+        // background, exactly like Python's `client_ready` hook.
+        let content_ctx = ctx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = crate::content::ensure_topics(&content_ctx).await {
+                tracing::warn!("Failed to prepare the content channel: {err:#}");
+            }
+        });
+
         if ctx.db.get_bool("Quickstart", "sent", false) {
             return Ok(());
         }
+
+        // Prefer the bot card with the language picker (Python sends it from
+        // `inline_ready`). If no inline bot is configured or the bot cannot PM
+        // the owner yet, fall back to a normal userbot message.
+        if ctx.inline.send_welcome(ctx, ctx.me_id).await.is_ok() {
+            ctx.db.set("Quickstart", "sent", true);
+            return Ok(());
+        }
+
         ctx.send_self(ctx.tr("quickstart.text")).await?;
         ctx.db.set("Quickstart", "sent", true);
         Ok(())

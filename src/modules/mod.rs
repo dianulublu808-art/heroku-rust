@@ -5,21 +5,21 @@
 //! crate, so adding a new file is enough to make it discoverable.
 
 mod api_ratelimiter;
-mod common;
+pub(crate) mod common;
 mod eval;
 mod help;
 mod heroku_backup;
 mod heroku_config;
 mod heroku_info;
-mod heroku_security;
+pub(crate) mod heroku_security;
 mod heroku_settings;
 mod inline;
-mod loader;
+pub mod loader;
 mod quickstart;
 mod settings;
 mod terminal;
 mod test;
 mod translate;
 mod translations;
-mod updater;
-mod web;
+pub(crate) mod updater;
+pub(crate) mod web;

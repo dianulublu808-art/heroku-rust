@@ -10,6 +10,18 @@ use serde_yaml::Value;
 
 const EN: &str = include_str!("../langpacks/en.yml");
 const RU: &str = include_str!("../langpacks/ru.yml");
+const UK: &str = include_str!("../langpacks/ua.yml");
+const DE: &str = include_str!("../langpacks/de.yml");
+const JA: &str = include_str!("../langpacks/jp.yml");
+const LEET: &str = include_str!("../langpacks/leet.yml");
+const UWU: &str = include_str!("../langpacks/uwu.yml");
+const TIKTOK: &str = include_str!("../langpacks/tiktok.yml");
+const NEOFIT: &str = include_str!("../langpacks/neofit.yml");
+
+/// Canonical language codes shown by `.setlang` and the language picker.
+pub const LANGUAGES: &[&str] = &[
+    "en", "ru", "uk", "de", "ja", "leet", "uwu", "tiktok", "neofit",
+];
 
 pub struct Translator {
     lang: RwLock<String>,
@@ -19,9 +31,19 @@ pub struct Translator {
 impl Translator {
     pub fn new(lang: impl Into<String>) -> Self {
         let mut packs = HashMap::new();
-        packs.insert("en".to_owned(), load_pack(EN));
-        packs.insert("ru".to_owned(), load_pack(RU));
-        packs.insert("uk".to_owned(), load_pack(RU));
+        for (code, raw) in [
+            ("en", EN),
+            ("ru", RU),
+            ("uk", UK),
+            ("de", DE),
+            ("ja", JA),
+            ("leet", LEET),
+            ("uwu", UWU),
+            ("tiktok", TIKTOK),
+            ("neofit", NEOFIT),
+        ] {
+            packs.insert(code.to_owned(), load_pack(raw));
+        }
         Self {
             lang: RwLock::new(normalize_lang(&lang.into())),
             packs,
@@ -43,7 +65,7 @@ impl Translator {
     }
 
     pub fn available(&self) -> Vec<&'static str> {
-        vec!["en", "ru"]
+        LANGUAGES.to_vec()
     }
 
     /// Translate a dotted key, e.g. `help.title`.
@@ -81,10 +103,22 @@ impl Translator {
     }
 }
 
+/// Resolve a user-provided language code to its canonical form.
+pub fn canonical_lang(lang: &str) -> String {
+    normalize_lang(lang)
+}
+
 fn normalize_lang(lang: &str) -> String {
     let lang = lang.trim().to_lowercase();
     match lang.as_str() {
-        "ru" | "uk" | "be" => "ru".to_owned(),
+        "ru" | "be" => "ru".to_owned(),
+        "ua" | "uk" => "uk".to_owned(),
+        "de" => "de".to_owned(),
+        "jp" | "ja" => "ja".to_owned(),
+        "leet" => "leet".to_owned(),
+        "uwu" => "uwu".to_owned(),
+        "tiktok" => "tiktok".to_owned(),
+        "neofit" => "neofit".to_owned(),
         _ => "en".to_owned(),
     }
 }

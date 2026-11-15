@@ -8,18 +8,23 @@
 // Keep them compiled without flooding the build with dead-code warnings.
 #![allow(dead_code)]
 
+mod accounts;
 mod args;
 mod config;
+mod content;
 mod ctx;
 mod database;
 mod dispatcher;
+mod inline;
 mod logbuf;
 mod login;
 mod module;
 mod modules;
+mod protection;
 mod security;
 mod tg;
 mod translations;
+mod ziparch;
 
 use std::sync::Arc;
 
@@ -36,6 +41,7 @@ use crate::config::{Cli, Config};
 use crate::ctx::Ctx;
 use crate::database::Database;
 use crate::dispatcher::Dispatcher;
+use crate::inline::InlineManager;
 use crate::logbuf::{LogBuffer, TeeMaker};
 use crate::module::Modules;
 use crate::security::Security;
@@ -68,21 +74,30 @@ async fn async_main() -> Result<()> {
         data_root.display()
     );
 
-    let db = Arc::new(Database::open(Config::db_path(&data_root))?);
+    let (db_path, session_path) = accounts::active_paths(&data_root);
+    let db = Arc::new(Database::open(db_path)?);
     let security = Security::new(db.clone());
 
+    let protection = protection::protection();
+    protection.configure(
+        db.get_bool("APIRatelimiterMod", "enabled", true),
+        db.get_i64("APIRatelimiterMod", "threshold", 100)
+            .clamp(1, 1_000_000) as usize,
+        db.get_i64("APIRatelimiterMod", "time_sample", 15)
+            .clamp(1, 86_400) as u64,
+        db.get_i64("APIRatelimiterMod", "local_floodwait", 30)
+            .clamp(1, 86_400) as u64,
+    );
+
     let session = Arc::new(
-        SqliteSession::open(Config::session_path(&data_root))
+        SqliteSession::open(&session_path)
             .await
             .context("failed to open session database")?,
     );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            Config::session_path(&data_root),
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ = std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o600));
     }
     let session_view = erase(session.clone());
 
@@ -95,7 +110,18 @@ async fn async_main() -> Result<()> {
     let pool_task = tokio::spawn(runner.run());
 
     if !client.is_authorized().await? {
-        login::interactive_login(&client, &session_view, &config).await?;
+        let qr = cli.qr
+            || std::env::var("TG_QR")
+                .map(|value| {
+                    let value = value.trim().to_ascii_lowercase();
+                    !value.is_empty() && value != "0" && value != "false" && value != "no"
+                })
+                .unwrap_or(false);
+        if qr {
+            login::qr_login(&client, &session_view, &config).await?;
+        } else {
+            login::interactive_login(&client, &session_view, &config).await?;
+        }
     }
 
     let me = client.get_me().await.context("failed to fetch self user")?;
@@ -117,6 +143,7 @@ async fn async_main() -> Result<()> {
     let modules = Modules::discover();
     info!("Discovered {} modules", modules.all().len());
 
+    let inline = Arc::new(InlineManager::new());
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         session: session_view.clone(),
@@ -127,6 +154,7 @@ async fn async_main() -> Result<()> {
         security,
         translator,
         log_buffer,
+        inline: inline.clone(),
         started: std::time::Instant::now(),
         me_id,
         me_username,
@@ -140,6 +168,12 @@ async fn async_main() -> Result<()> {
                     .set_value(module.name(), spec.key, spec.default.to_value());
             }
         }
+    }
+
+    // Start the bot before `on_load` so modules (Quickstart) can use it for
+    // their first-run cards, exactly like Python's `inline_ready` hook.
+    if let Err(err) = ctx.inline.start(&ctx).await {
+        warn!("Inline bot is not running: {err:#}");
     }
 
     for module in ctx.modules.all() {
@@ -178,6 +212,17 @@ async fn async_main() -> Result<()> {
             }
             _ = tick.tick() => {
                 dispatcher.tick_ratelimit();
+                sync_protection(&ctx.db);
+                if protection.take_warning() {
+                    let freeze = protection.freeze_secs().to_string();
+                    let pending = protection.pending_calls().to_string();
+                    let _ = ctx
+                        .send_self(ctx.tf(
+                            "api_protection.warning",
+                            &[&freeze, &pending],
+                        ))
+                        .await;
+                }
             }
             update = updates.next() => {
                 match update {
@@ -207,6 +252,8 @@ async fn async_main() -> Result<()> {
         }
     }
 
+    ctx.inline.stop().await;
+
     if let Err(err) = updates.sync_update_state().await {
         warn!("Failed to persist update state: {err}");
     }
@@ -215,6 +262,18 @@ async fn async_main() -> Result<()> {
     db.save();
     info!("Session saved. Bye!");
     Ok(())
+}
+
+fn sync_protection(db: &Database) {
+    protection::protection().configure(
+        db.get_bool("APIRatelimiterMod", "enabled", true),
+        db.get_i64("APIRatelimiterMod", "threshold", 100)
+            .clamp(1, 1_000_000) as usize,
+        db.get_i64("APIRatelimiterMod", "time_sample", 15)
+            .clamp(1, 86_400) as u64,
+        db.get_i64("APIRatelimiterMod", "local_floodwait", 30)
+            .clamp(1, 86_400) as u64,
+    );
 }
 
 fn print_banner(data_root: &std::path::Path) {

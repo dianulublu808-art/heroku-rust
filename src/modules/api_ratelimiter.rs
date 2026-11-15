@@ -1,11 +1,12 @@
 // ©️ Heroku Userbot — Rust rewrite
 // Licensed under the GNU AGPLv3. See LICENSE.
 
-//! API rate limiter.
+//! External API flood protection.
 //!
-//! grammers and Telegram itself already throttle requests. This module exists so
-//! that the command namespace and database layout stay compatible with the
-//! Python build.
+//! This is the real Heroku `APILimiter`: every outgoing message action is
+//! counted in a sliding window (see [`crate::protection`]) and the userbot is
+//! frozen locally when the threshold is exceeded. The commands below let the
+//! owner inspect the state, toggle protection and suspend it temporarily.
 
 use std::sync::Arc;
 
@@ -14,8 +15,13 @@ use async_trait::async_trait;
 
 use crate::args::Args;
 use crate::ctx::Ctx;
-use crate::module::{CommandDef, Module, ModuleFactory};
-use crate::tg::Msg;
+use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
+use crate::protection::protection;
+use crate::tg::{escape_html, Msg};
+
+/// Database namespace used by [`APIRatelimiterMod`]. Matches the module name so
+/// `.config APIRatelimiterMod` edits the same values in real time.
+pub const NS: &str = "APIRatelimiterMod";
 
 pub struct APIRatelimiterMod;
 
@@ -26,30 +32,143 @@ impl Module for APIRatelimiterMod {
     }
 
     fn description(&self) -> &'static str {
-        "Telegram API rate limiting status"
+        "Helps the userbot avoid spamming the Telegram API"
     }
 
     fn commands(&self) -> Vec<CommandDef> {
         vec![
-            CommandDef::new("apilimiter", "Show API rate limiter status"),
-            CommandDef::new("setapilimiter", "Configure API rate limiting").usage("<value>"),
+            CommandDef::new(
+                "api_fw_protection",
+                "Show or toggle local Telegram API flood protection",
+            )
+            .usage("[on|off]"),
+            CommandDef::new(
+                "suspend_api_protect",
+                "Temporarily disable API flood protection",
+            )
+            .usage("<seconds>"),
+        ]
+    }
+
+    fn config_spec(&self) -> Vec<ConfigSpec> {
+        vec![
+            ConfigSpec::new(
+                "enabled",
+                "Enable local API flood protection",
+                ConfigDefault::Bool(true),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "time_sample",
+                "Time sample (seconds) used to count outgoing requests",
+                ConfigDefault::Int(15),
+                ConfigKind::Int,
+            ),
+            ConfigSpec::new(
+                "threshold",
+                "Number of requests within the sample that triggers protection",
+                ConfigDefault::Int(100),
+                ConfigKind::Int,
+            ),
+            ConfigSpec::new(
+                "local_floodwait",
+                "Freeze the userbot for this many seconds when the limit is hit",
+                ConfigDefault::Int(30),
+                ConfigKind::Int,
+            ),
         ]
     }
 
     async fn handle(
         &self,
         ctx: &Arc<Ctx>,
-        _command: &str,
+        command: &str,
         message: &Msg,
-        _args: &Args,
+        args: &Args,
     ) -> Result<()> {
+        match command {
+            "suspend_api_protect" => self.suspend(ctx, message, args).await,
+            _ => self.toggle(ctx, message, args).await,
+        }
+    }
+}
+
+impl APIRatelimiterMod {
+    async fn suspend(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
+        let Some(raw) = args.get(0) else {
+            message
+                .reply_html(ctx.tr("api_protection.args_invalid"))
+                .await?;
+            return Ok(());
+        };
+
+        let Ok(seconds) = raw.trim().parse::<u64>() else {
+            message
+                .reply_html(ctx.tr("api_protection.args_invalid"))
+                .await?;
+            return Ok(());
+        };
+
+        if seconds == 0 {
+            message
+                .reply_html(ctx.tr("api_protection.args_invalid"))
+                .await?;
+            return Ok(());
+        }
+
+        let seconds = seconds.min(86_400 * 365);
+        protection().suspend(seconds);
         message
-            .reply_html(
-                "🚦 <b>API rate limiter</b>\n\
-                 <i>Requests are throttled by grammers and Telegram flood-wait handling.</i>",
-            )
+            .reply_html(ctx.tf("api_protection.suspended_for", &[&seconds.to_string()]))
             .await?;
-        let _ = ctx;
+        Ok(())
+    }
+
+    async fn toggle(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
+        let state = protection();
+        if let Some(raw) = args.get(0) {
+            let enabled = match raw.trim().to_lowercase().as_str() {
+                "on" | "enable" | "true" | "1" => true,
+                "off" | "disable" | "false" | "0" => false,
+                _ => {
+                    message
+                        .reply_html(ctx.tr("api_protection.args_invalid"))
+                        .await?;
+                    return Ok(());
+                }
+            };
+            ctx.db.set(NS, "enabled", enabled);
+            state.set_enabled(enabled);
+            let key = if enabled {
+                "api_protection.on"
+            } else {
+                "api_protection.off"
+            };
+            message.reply_html(ctx.tr(key)).await?;
+            return Ok(());
+        }
+
+        let suspended = state
+            .suspended_for()
+            .map(|seconds| format!("{seconds}s"))
+            .unwrap_or_else(|| "—".to_owned());
+        let frozen = state
+            .frozen_for()
+            .map(|seconds| format!("{seconds}s"))
+            .unwrap_or_else(|| "—".to_owned());
+
+        let text = ctx.tn(
+            "api_protection.status",
+            &[
+                ("enabled", if state.enabled() { "✅" } else { "❌" }),
+                ("threshold", &state.threshold().to_string()),
+                ("sample", &state.sample_secs().to_string()),
+                ("freeze", &state.freeze_secs().to_string()),
+                ("frozen", &escape_html(&frozen)),
+                ("suspended", &escape_html(&suspended)),
+            ],
+        );
+        message.reply_html(text).await?;
         Ok(())
     }
 }

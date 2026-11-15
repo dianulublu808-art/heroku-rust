@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use grammers_client::message::Button;
 use serde_json::Value;
 
 use crate::args::Args;
@@ -68,7 +69,20 @@ impl Module for HerokuSecurityMod {
             "sgroupadd" => self.group_add_user(ctx, message, args, true).await,
             "sgroupdel" => self.group_add_user(ctx, message, args, false).await,
             "sgrouprule" => self.group_add_rule(ctx, message, args).await,
-            "security" => self.masks(ctx, message, args).await,
+            "security" => {
+                if args.list.is_empty() {
+                    let (html, buttons) = security_card(ctx);
+                    if ctx
+                        .inline
+                        .send_to_user(ctx, ctx.me_id, html, buttons)
+                        .await
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
+                self.masks(ctx, message, args).await
+            }
             "tsec" => self.tsec(ctx, message, args).await,
             "tsecrm" => self.tsec_remove(ctx, message, args).await,
             "tsecclr" => {
@@ -490,6 +504,320 @@ impl HerokuSecurityMod {
         message.reply_html(ctx.tr("security.tsec_removed")).await?;
         Ok(())
     }
+}
+
+pub(crate) fn security_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let owners = visible_owners(ctx);
+    let groups = ctx.security.sgroups();
+    let mut lines = vec![ctx.tr("security.title")];
+    lines.push(format!(
+        "▫️ {}: <b>{}</b>",
+        ctx.tr("security.owners_label"),
+        owners.len()
+    ));
+    lines.push(format!(
+        "▫️ {}: <b>{}</b>",
+        ctx.tr("security.sgroups_label"),
+        groups.len()
+    ));
+    lines.push(format!(
+        "▫️ {}: <code>{}</code> ({})",
+        ctx.tr("security.mask_default"),
+        ctx.security.default_mask(),
+        mask_to_names(ctx.security.default_mask()).join(", ")
+    ));
+    lines.push(format!(
+        "▫️ {}: <code>{}</code> ({})",
+        ctx.tr("security.mask_bounding"),
+        ctx.security.bounding_mask(),
+        mask_to_names(ctx.security.bounding_mask()).join(", ")
+    ));
+    lines.push(String::new());
+    lines.push(ctx.tr("security.card_hint"));
+
+    let buttons = vec![
+        vec![
+            Button::data(ctx.tr("security.btn_owners"), b"heroku:sec:o".to_vec()),
+            Button::data(ctx.tr("security.btn_groups"), b"heroku:sec:g".to_vec()),
+        ],
+        vec![Button::data("✖️ Close", b"heroku:close".to_vec())],
+    ];
+    (lines.join("\n"), buttons)
+}
+
+pub(crate) fn owner_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let owners = visible_owners(ctx);
+    let mut lines = vec![ctx.tr("security.owners")];
+    lines.push(ctx.tr("security.owners_hint"));
+    lines.push(String::new());
+    for owner in &owners {
+        let you = if *owner == ctx.me_id { " · you" } else { "" };
+        lines.push(format!("👑 <code>{owner}</code>{you}"));
+    }
+    lines.push(String::new());
+    lines.push(ctx.tr("security.owners_footer"));
+
+    let mut rows = vec![vec![Button::data(
+        ctx.tr("security.btn_add_owner"),
+        b"heroku:sec:o:add".to_vec(),
+    )]];
+    for owner in owners {
+        if owner == ctx.me_id {
+            continue;
+        }
+        rows.push(vec![Button::data(
+            format!("❌ {owner}"),
+            format!("heroku:sec:o:rm:{owner}").into_bytes(),
+        )]);
+    }
+    rows.push(vec![Button::data(
+        ctx.tr("security.btn_back"),
+        b"heroku:sec".to_vec(),
+    )]);
+    rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+    (lines.join("\n"), rows)
+}
+
+pub(crate) fn groups_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let groups = ctx.security.sgroups();
+    let mut lines = vec![ctx.tr("security.groups_title")];
+    if groups.is_empty() {
+        lines.push(ctx.tr("security.groups_empty"));
+    } else {
+        for (name, group) in &groups {
+            let users = group
+                .get("users")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            let rules = group
+                .get("permissions")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            lines.push(format!(
+                "🛡 <code>{}</code> — 👤 {} · 📜 {}",
+                escape_html(name),
+                users,
+                rules
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push(ctx.tr("security.groups_hint"));
+
+    let mut rows = Vec::new();
+    for name in groups.keys() {
+        rows.push(vec![Button::data(
+            format!("🛡 {name}"),
+            format!("heroku:sec:g:{}", escape_callback(name)).into_bytes(),
+        )]);
+    }
+    rows.push(vec![Button::data(
+        ctx.tr("security.btn_new_group"),
+        b"heroku:sec:g:new".to_vec(),
+    )]);
+    rows.push(vec![Button::data(
+        ctx.tr("security.btn_back"),
+        b"heroku:sec".to_vec(),
+    )]);
+    rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+    (lines.join("\n"), rows)
+}
+
+pub(crate) fn group_card(ctx: &Arc<Ctx>, name: &str) -> (String, Vec<Vec<Button>>) {
+    let groups = ctx.security.sgroups();
+    let Some(group) = groups.get(name) else {
+        let (mut html, buttons) = groups_card(ctx);
+        html = format!(
+            "{}\n\n{}",
+            ctx.tf("security.sgroup_missing", &[&escape_html(name)]),
+            html
+        );
+        return (html, buttons);
+    };
+
+    let mut lines = vec![ctx.tf("security.group_title", &[&escape_html(name)])];
+    let users = group
+        .get("users")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rules = group
+        .get("permissions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    lines.push(format!(
+        "{}: <b>{}</b>",
+        ctx.tr("security.group_users"),
+        users.len()
+    ));
+    if users.is_empty() {
+        lines.push(format!("▫️ {}", ctx.tr("security.group_no_users")));
+    }
+    for user in &users {
+        let id = user.as_i64().unwrap_or_default();
+        lines.push(format!("👤 <a href=\"tg://user?id={id}\">{id}</a>"));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "{}: <b>{}</b>",
+        ctx.tr("security.group_rules"),
+        rules.len()
+    ));
+    if rules.is_empty() {
+        lines.push(format!("▫️ {}", ctx.tr("security.group_no_rules")));
+    }
+    for rule in &rules {
+        lines.push(format!(
+            "📜 <code>{}/{}</code>",
+            escape_html(rule.get("rule_type").and_then(Value::as_str).unwrap_or("?")),
+            escape_html(rule.get("rule").and_then(Value::as_str).unwrap_or("?"))
+        ));
+    }
+
+    let encoded = escape_callback(name);
+    let mut rows = vec![
+        vec![
+            Button::data(
+                ctx.tr("security.btn_add_user"),
+                format!("heroku:sec:g:{encoded}:u").into_bytes(),
+            ),
+            Button::data(
+                ctx.tr("security.btn_add_rule"),
+                format!("heroku:sec:g:{encoded}:r").into_bytes(),
+            ),
+        ],
+        vec![Button::data(
+            ctx.tr("security.btn_delete_group"),
+            format!("heroku:sec:g:{encoded}:d").into_bytes(),
+        )],
+    ];
+    // Removing users is a one-tap action; keep the buttons compact.
+    for user in &users {
+        let id = user.as_i64().unwrap_or_default();
+        rows.push(vec![Button::data(
+            format!("❌ {}", id),
+            format!("heroku:sec:g:{encoded}:rm:{id}").into_bytes(),
+        )]);
+    }
+    rows.push(vec![Button::data(
+        ctx.tr("security.btn_back"),
+        b"heroku:sec:g".to_vec(),
+    )]);
+    rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+    (lines.join("\n"), rows)
+}
+
+pub(crate) async fn add_owner_pending(ctx: &Arc<Ctx>, raw: &str) -> (String, Vec<Vec<Button>>) {
+    let Some(user) = resolve_inline_user(ctx, raw).await else {
+        let (mut html, buttons) = owner_card(ctx);
+        html = format!("{}\n\n{}", ctx.tr("security.inline_bad_user"), html);
+        return (html, buttons);
+    };
+    let html = if ctx.security.add_owner(user) {
+        ctx.tf("security.added", &[&user.to_string()])
+    } else {
+        ctx.tr("security.already")
+    };
+    let (card, buttons) = owner_card(ctx);
+    (format!("{html}\n\n{card}"), buttons)
+}
+
+pub(crate) async fn create_group_pending(ctx: &Arc<Ctx>, raw: &str) -> (String, Vec<Vec<Button>>) {
+    let name = raw.trim();
+    if name.is_empty() || !name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+        let (mut html, buttons) = groups_card(ctx);
+        html = format!("{}\n\n{}", ctx.tr("security.inline_bad_group"), html);
+        return (html, buttons);
+    }
+    let mut groups = ctx.security.sgroups();
+    if groups.contains_key(name) {
+        let (html, buttons) = group_card(ctx, name);
+        return (format!("{}\n\n{html}", ctx.tr("security.already")), buttons);
+    }
+    groups.insert(
+        name.to_owned(),
+        serde_json::json!({"users": [], "permissions": []}),
+    );
+    ctx.security.save_sgroups(groups);
+    group_card(ctx, name)
+}
+
+pub(crate) async fn add_group_user_pending(
+    ctx: &Arc<Ctx>,
+    group: &str,
+    raw: &str,
+) -> (String, Vec<Vec<Button>>) {
+    let Some(user) = resolve_inline_user(ctx, raw).await else {
+        let (mut html, buttons) = group_card(ctx, group);
+        html = format!("{}\n\n{}", ctx.tr("security.inline_bad_user"), html);
+        return (html, buttons);
+    };
+    if !ctx.security.sgroups().contains_key(group) {
+        return groups_card(ctx);
+    }
+    let html = if ctx.security.add_sgroup(group, user) {
+        ctx.tf("security.rule_added", &[&escape_html(group)])
+    } else {
+        ctx.tr("security.not_present")
+    };
+    let (card, buttons) = group_card(ctx, group);
+    (format!("{html}\n\n{card}"), buttons)
+}
+
+pub(crate) async fn add_group_rule_pending(
+    ctx: &Arc<Ctx>,
+    group: &str,
+    raw: &str,
+) -> (String, Vec<Vec<Button>>) {
+    if !ctx.security.sgroups().contains_key(group) {
+        return groups_card(ctx);
+    }
+    let mut parts = raw.split_whitespace();
+    let (Some(rule_type), Some(rule)) = (parts.next(), parts.next()) else {
+        let (mut html, buttons) = group_card(ctx, group);
+        html = format!("{}\n\n{}", ctx.tr("security.inline_bad_rule"), html);
+        return (html, buttons);
+    };
+    if !matches!(rule_type, "command" | "module") {
+        let (mut html, buttons) = group_card(ctx, group);
+        html = format!("{}\n\n{}", ctx.tr("security.inline_bad_rule"), html);
+        return (html, buttons);
+    }
+    let html = if ctx.security.add_group_rule(group, rule_type, rule) {
+        ctx.tf("security.rule_added", &[&escape_html(group)])
+    } else {
+        ctx.tr("security.not_present")
+    };
+    let (card, buttons) = group_card(ctx, group);
+    (format!("{html}\n\n{card}"), buttons)
+}
+
+fn visible_owners(ctx: &Arc<Ctx>) -> Vec<i64> {
+    let mut owners = ctx.security.owners();
+    if !owners.contains(&ctx.me_id) {
+        owners.push(ctx.me_id);
+    }
+    owners
+}
+
+async fn resolve_inline_user(ctx: &Arc<Ctx>, raw: &str) -> Option<i64> {
+    let raw = raw.trim();
+    if let Ok(id) = raw.parse::<i64>() {
+        return Some(id);
+    }
+    ctx.resolve(raw)
+        .await
+        .map(|peer| super::common::peer_id(&peer))
+}
+
+/// Security group names only contain `[A-Za-z0-9_]`, so callback encoding is a no-op.
+/// It is kept as a helper so a future name policy cannot silently break callbacks.
+fn escape_callback(name: &str) -> String {
+    name.to_owned()
 }
 
 fn parse_mask(raw: &str) -> Option<u32> {
