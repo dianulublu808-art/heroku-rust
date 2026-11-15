@@ -2157,6 +2157,27 @@ impl InlineManager {
                     warn!("Failed to start the loader quiz: {err:#}");
                 }
             }
+            _ if data.starts_with("heroku:install:") => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                let platform = data.trim_start_matches("heroku:install:");
+                let (_, buttons) = crate::modules::settings::installation_card(ctx);
+                let text = ctx.tr(&format!("settings.{platform}_install"));
+                let _ = call
+                    .answer()
+                    .edit(
+                        InputMessage::new()
+                            .html(text)
+                            .reply_markup(ReplyMarkup::from_buttons(&buttons)),
+                    )
+                    .await;
+            }
             _ if data.starts_with("heroku:mod:") => {
                 if !allowed {
                     let _ = call

@@ -17,7 +17,7 @@ mod inline;
 pub mod loader;
 pub(crate) mod loader_restrictor;
 mod quickstart;
-mod settings;
+pub(crate) mod settings;
 pub(crate) mod terminal;
 pub(crate) mod test;
 mod translate;

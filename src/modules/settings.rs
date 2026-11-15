@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use grammers_client::message::InputMessage;
+use grammers_client::message::{Button, InputMessage};
 use serde_json::{json, Value};
 
 use crate::args::Args;
@@ -49,7 +49,7 @@ impl Module for CoreMod {
             CommandDef::new("togglecmd", "Enable or disable a command").usage("[module] <command>"),
             CommandDef::new("togglemod", "Enable or disable a module").usage("<module>"),
             CommandDef::new("clearmodule", "Remove all data of a module").usage("<module>"),
-            CommandDef::new("installation", "Installation guide"),
+            CommandDef::new("installation", "Installation guide").usage("[-vds|-wsl|-ul|-hh|-uni]"),
         ]
     }
 
@@ -103,7 +103,7 @@ impl Module for CoreMod {
             "togglecmd" => self.toggle_command(ctx, message, args).await,
             "togglemod" => self.toggle_module(ctx, message, args).await,
             "clearmodule" => self.clear_module(ctx, message, args).await,
-            "installation" => self.installation(ctx, message).await,
+            "installation" => self.installation(ctx, message, args).await,
             _ => Ok(()),
         }
     }
@@ -547,21 +547,73 @@ impl CoreMod {
         Ok(())
     }
 
-    async fn installation(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+    async fn installation(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
+        if let Some(platform) = installation_platform(&args.raw) {
+            message.reply_html(installation_text(ctx, platform)).await?;
+            return Ok(());
+        }
+
+        let (html, buttons) = installation_card(ctx);
+        if ctx
+            .inline
+            .send_photo_to_user(ctx, ctx.me_id, INSTALL_PHOTO, html, buttons)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        // Without the inline bot the picker is unusable; fall back to the
+        // universal guide, exactly like Python's photo fallback.
         message
-            .reply_html(format!(
-                "{}\n\n\
-                 <pre><code class=\"language-bash\">git clone https://github.com/Heroku-userbot/Heroku\n\
-                 cd Heroku\n\
-                 ./install.sh</code></pre>\n\n\
-                 {}\n\n{}",
-                ctx.tr("settings.installation_title"),
-                ctx.tr("settings.installation_note"),
-                ctx.tr("help.support")
-            ))
+            .reply_html(ctx.tr("settings.universal_install"))
             .await?;
         Ok(())
     }
+}
+
+const INSTALL_PHOTO: &str =
+    "https://raw.githubusercontent.com/Heroku-userbot/assets/refs/heads/main/heroku_installation.jpg";
+
+const INSTALL_PLATFORMS: &[&str] = &["vds", "wsl", "userland", "hikkahost", "universal"];
+
+/// Map Python's installation flags to a platform key.
+fn installation_platform(raw: &str) -> Option<&'static str> {
+    for token in raw.split_whitespace() {
+        let platform = match token {
+            "-vds" => "vds",
+            "-wsl" => "wsl",
+            "-ul" | "-userland" => "userland",
+            "-hh" | "-hikkahost" => "hikkahost",
+            "-uni" | "-universal" => "universal",
+            _ => continue,
+        };
+        return Some(platform);
+    }
+    None
+}
+
+fn installation_text(ctx: &Arc<Ctx>, platform: &str) -> String {
+    ctx.tr(&format!("settings.{platform}_install"))
+}
+
+/// Inline installation picker: caption plus platform buttons, two per row.
+pub(crate) fn installation_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    for platform in INSTALL_PLATFORMS {
+        row.push(Button::data(
+            ctx.tr(&format!("settings.{platform}")),
+            format!("heroku:install:{platform}").into_bytes(),
+        ));
+        if row.len() == 2 {
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    (ctx.tr("settings.choose_installation"), rows)
 }
 
 inventory::submit! {
