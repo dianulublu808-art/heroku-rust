@@ -35,7 +35,7 @@ settings:
   alias_added: "✅ Алиас <code>{}</code> → <code>{}</code>"
   alias_removed: "✅ Алиас <code>{}</code> удалён"
   alias_missing: "🚫 Алиас не найден"
-  alias_args: "🚫 Использование: .addalias <алиас> <команда> [аргументы]"
+  alias_args: "🚫 Использование: .addalias &lt;алиас&gt; &lt;команда&gt; [аргументы]"
   blacklisted: "✅ Чат <code>{}</code> добавлен в чёрный список"
   unblacklisted: "✅ Чат <code>{}</code> убран из чёрного списка"
   user_blacklisted: "✅ Пользователь <code>{}</code> заблокирован"
@@ -234,12 +234,16 @@ backup:
   bad_file: "🚫 Некорректный файл резервной копии"
   period_set: "✅ Период резервного копирования: {} ч"
   period_never: "🚫 Автоматические бэкапы отключены"
-  period_invalid: "🚫 Использование: .set_backup_period <часы 0-199>"
+  period_invalid: "🚫 Использование: .set_backup_period &lt;часы 0-199&gt;"
   period_title: "🕰 <b>Автоматические бэкапы</b>\n\nТекущий период: <b>{}</b>\n\nВыберите новый период:"
+  period_prompt: "⌚️ <b>Юнит «ALPHA»</b> создает регулярные резервные копии. Эти настройки можно изменить позже.\n\nПожалуйста, выберите периодичность резервного копирования\n\n<b>🚫 Таким образом невозможно восстановить модули скачанные с файлов командой .lm! Будьте осторожны и делайте .backupmods перед восстановлением.</b>"
   period_hours: "{} ч"
   btn_never: "🚫 Никогда"
   creating_modules: "⏳ Архивирую скачанные модули…"
   modules_backup: "📦 Резервная копия модулей ({} файлов)"
+  confirm_restore: "❓ <b>Вы уверены?</b>"
+  confirm_yes: "✅ Да"
+  all_restored_bot: "Полный бэкап восстановлен, перезапускаюсь..."
   restoring_modules: "⏳ Восстанавливаю модули…"
   mods_restored: "✅ Восстановлено {} файлов модулей"
 
@@ -256,7 +260,7 @@ info:
   user: "▫️ Аккаунт: <b>{}</b>"
   links: "🌐 <a href=\"https://github.com/dianulublu808-art/heroku-rust\">GitHub</a> · <a href=\"https://t.me/heroku_userbot\">Канал</a>"
   message: "{}\n<blockquote>┌\n├  【👤】 <b>𝙱𝚕𝚊𝚍𝚎𝚕𝚎𝚝𝚜</b>: {me}\n├  【🤖】 <b>𝙱𝚎𝚛𝚜𝚒𝚢𝚊</b>: {version}\n└</blockquote>\n<blockquote>┌\n├  【📷】 <b>𝙿𝚛𝚎𝚏𝚒𝚔𝚜</b>: {prefix}\n├  【🔄】 <b>𝚄𝚙𝚝𝚊𝚒𝚖</b>: {uptime}\n├  【👤】 <b>𝙱𝚛𝚊𝚗𝚌𝚑</b>: {branch}\n└</blockquote>\n<blockquote>┌\n├  【❗️】 <b>𝙲𝙿𝚄</b>: {cpu_usage}\n├  【🛡】 <b>𝚁𝙰𝙼</b>: {ram_usage}\n├  【📊】 <b>𝙿𝚒𝚗𝚐</b>: {ping} ms\n└</blockquote>\n<blockquote>┌\n├  【🛡】 <b>𝙾𝚋𝚗𝚘𝚟𝚕𝚎𝚗𝚒𝚎</b>: {upd}\n├  【🤖】 <b>𝙷𝚘𝚜𝚝</b>: {platform}\n├  【🤖】 <b>𝙾𝚂</b>: {os}\n├  【🤖】 <b>𝙳𝚟𝚒𝚣𝚑𝚘𝚔</b>: {htl_ver}\n└</blockquote>"
-  rich_message: '<figure><img src="{banner_url}"/></figure><details><summary>Обзор</summary><table><tr><th>Параметр</th><th>Значение</th></tr><tr><td>【👤】 <b>Владелец</b></td><td>{me}</td></tr><tr><td>【🤖】 <b>Версия</b></td><td>{version}</td></tr><tr><td>【📷】 <b>Префикс</b></td><td>{prefix}</td></tr><tr><td>【🔄】 <b>Аптайм</b></td><td>{uptime}</td></tr><tr><td>【👤】 <b>Ветка</b></td><td>{branch}</td></tr></table></details><details><summary>Статус</summary><table><tr><th>Параметр</th><th>Значение</th></tr><tr><td>【🛡】 <b>Обновление</b></td><td>{upd}</td></tr><tr><td>【❗️】 <b>CPU</b></td><td>{cpu_usage}</td></tr><tr><td>【🛡】 <b>RAM</b></td><td>{ram_usage}</td></tr><tr><td>【📊】 <b>Пинг</b></td><td>{ping} ms</td></tr></table></details><details><summary>Окружение</summary><table><tr><th>Параметр</th><th>Значение</th></tr><tr><td>【🤖】 <b>Хост</b></td><td>{platform}</td></tr><tr><td>【🤖】 <b>ОС</b></td><td>{os}</td></tr><tr><td>【🤖】 <b>Движок</b></td><td>{htl_ver}</td></tr></table></details>'
+  rich_message: "<figure><img src=\"{banner_url}\"/></figure><details><summary>Обзор</summary><table><tr><th>Параметр</th><th>Значение</th></tr><tr><td>【👤】 <b>Владелец</b></td><td>{me}</td></tr><tr><td>【🤖】 <b>Версия</b></td><td>{version}</td></tr><tr><td>【📷】 <b>Префикс</b></td><td>{prefix}</td></tr><tr><td>【🔄】 <b>Аптайм</b></td><td>{uptime}</td></tr><tr><td>【👤】 <b>Ветка</b></td><td>{branch}</td></tr></table></details><details><summary>Статус</summary><table><tr><th>Параметр</th><th>Значение</th></tr><tr><td>【🛡】 <b>Обновление</b></td><td>{upd}</td></tr><tr><td>【❗️】 <b>CPU</b></td><td>{cpu_usage}</td></tr><tr><td>【🛡】 <b>RAM</b></td><td>{ram_usage}</td></tr><tr><td>【📊】 <b>Пинг</b></td><td>{ping} ms</td></tr></table></details><details><summary>Окружение</summary><table><tr><th>Параметр</th><th>Значение</th></tr><tr><td>【🤖】 <b>Хост</b></td><td>{platform}</td></tr><tr><td>【🤖】 <b>ОС</b></td><td>{os}</td></tr><tr><td>【🤖】 <b>Движок</b></td><td>{htl_ver}</td></tr></table></details>"
   missing_placeholder: "🚫 <b>Неизвестный плейсхолдер</b> <code>{placeholder}</code>"
   no_banner: "😶 <b>По указанной ссылке ничего не найдено</b> <code>{}</code>.\n\nУбедитесь, что ссылка ведёт прямо на файл изображения."
   up_to_date: "<b>Актуальная версия</b>"
@@ -287,9 +291,8 @@ translations:
   lang_deleted: "<b>Язык успешно удалён</b>"
 
 translate:
-  usage: "🚫 Использование: .tr <текст> или ответ на сообщение"
+  usage: "🚫 Использование: .tr &lt;текст&gt; или ответ на сообщение"
   no_args: "🚫 <b>Нет текста для перевода</b>"
-  language: "en"
   result: "🌐 <b>Перевод:</b>\n{}"
   error: "🚫 <b>Ошибка перевода</b>"
 
@@ -322,7 +325,7 @@ test:
   bad_module: "🚫 <b>Неизвестный модуль</b> <code>{}</code>"
 
 terminal:
-  usage: "🚫 Использование: .terminal <команда>"
+  usage: "🚫 Использование: .terminal &lt;команда&gt;"
   running: "💻 <b>Выполняется</b>\n<pre><code class=\"language-bash\">{}</code></pre>"
   result: "💻 <b>Терминал</b>\n<pre><code class=\"language-bash\">{}</code></pre>"
   dangerous_command: "🚫 <b>Опасная команда заблокирована:</b> <code>{}</code>"
@@ -338,7 +341,7 @@ terminal:
   sudo_failed: "🚫 <b>Не удалось отправить пароль:</b> <code>{}</code>"
 
 eval:
-  usage: "🚫 Использование: .e <выражение>"
+  usage: "🚫 Использование: .e &lt;выражение&gt;"
   result: "💻 <b>Результат</b>\n<pre><code>{}</code></pre>"
   error: "🚫 <b>Ошибка вычисления</b>\n<pre><code>{}</code></pre>"
   code_usage: "🚫 Использование: <code>.{}</code> с кодом или ответом на сообщение с кодом"
@@ -387,8 +390,11 @@ updater:
   autoupdate_on: "✅ Автопроверка обновлений включена"
   autoupdate_off: "🚫 Автопроверка обновлений выключена. Включить: <code>{}autoupdate</code>"
   autoupdate_found: "🆕 Доступно {} новых коммит(ов) (<code>{}</code>). Установить: <code>.update -f</code>."
+  autoupdate_applying: "⬇️ Найдена новая версия <code>{}</code>, обновляюсь автоматически…"
+  major_update: "🆕 Доступно <b>{}</b> новых коммитов (<code>{}</code>). Это мажорное обновление — установите его вручную командой <code>.update -f</code>."
 
 loader:
+  verify_required: '<tg-emoji emoji-id=5188463524568926712>⚠️</tg-emoji> <b>Для разблокировки возможности устанавливать модули сторонних разработчиков пройдите тест в <a href="https://t.me/{}?start=lm_verify">вашем боте</a></b>'
   list: "📦 <b>Модули</b>\n{}"
   loaded: "✅ Модуль загружен"
   unloaded: "✅ Модуль выгружен"
@@ -490,8 +496,11 @@ inline:
   callback_forbidden: "🚫 Это действие только для владельца."
   expected_text: "✍️ <b>Ожидается текстовый ответ.</b>\nОтправьте нужное значение обычным сообщением."
 
-
 accounts:
+  switch_confirm: "⚠️ <b>Перенести этого юзербота на другой Telegram-аккаунт?</b>\nТекущая сессия будет архивирована, конфиг перенесён, а данные inline-бота будут созданы заново на новом аккаунте."
+  btn_yes: "🚸 Все равно подтвердить"
+  btn_no: "🔻 Закрыть"
+  switch_confirm_default: "⚠️ <b>Вернуться к основной учетной записи?</b>\nТекущий сеанс будет заархивирован, и пользовательский робот перезапустится."
   add_usage: "🚫 <b>Использование:</b>\n<code>.addacc &lt;номер&gt;</code> — начать вход\n<code>.addacc code &lt;код&gt;</code> — подтвердить код\n<code>.addacc 2fa &lt;пароль&gt;</code> — пароль двухфакторной аутентификации\n<code>.addacc resend</code> / <code>.addacc cancel</code>"
   cancelled: "✅ <b>Вход в аккаунт отменён</b>"
   bad_phone: "🚫 <b>Неверный номер:</b> <code>{}</code>"
@@ -522,5 +531,46 @@ accounts:
   inline_resend_done: "Новый код запрошен"
 
 quickstart:
+  base: "<tg-emoji emoji-id=5463379725441341739>🪐</tg-emoji> <b>Привет.</b> Твой юзербот <b>{}</b> теперь установлен.\n\n<tg-emoji emoji-id=5134202243486057363>💫</tg-emoji> <b>Нужна помощь?</b> Заходи в <a href=\"https://t.me/heroku_talks\">наш чат поддержки</a>. Мы помогаем <b>всем</b>.\n\n<tg-emoji emoji-id=4940480187436369099>💁‍♀️</tg-emoji> <b>Краткое руководство:</b>\n\n<tg-emoji emoji-id=5456197350416486261>1️⃣</tg-emoji> <b>Напиши</b> <code>.help</code><b>, чтобы увидеть список модулей</b>\n<tg-emoji emoji-id=5456261689026581678>2️⃣</tg-emoji> <b>Напиши</b> <code>.help &lt;Имя модуля/команда&gt;</code><b>, чтобы увидеть описание модуля</b>\n<tg-emoji emoji-id=5458366235886522404>3️⃣</tg-emoji> <b>Напиши</b> <code>.dlmod &lt;ссылка&gt;</code><b>, чтобы загрузить модуль по ссылке</b>\n<tg-emoji emoji-id=5456207331920483861>4️⃣</tg-emoji> <b>Напиши</b> <code>.loadmod</code> <b>в ответ на файл, чтобы загрузить из него модуль</b>\n<tg-emoji emoji-id=5456185418997340146>5️⃣</tg-emoji> <b>Напиши</b> <code>.unloadmod &lt;Имя модуля&gt;</code><b>, чтобы выгрузить модуль</b>\n\n<tg-emoji emoji-id=5456178297941561360>💡</tg-emoji> <b>Heroku поддерживает модули от Hikka, Friendly-Telegram и GeekTG, а также свои собственные.</b>\n"
+  btn_support: "🥷 Чат поддержки"
+  language: "🇷🇺 Русский"
+  language_saved: "🇷🇺 Язык сохранен!"
   text: "👋 <b>Добро пожаловать в Heroku!</b>\n\nВведите <code>.help</code>, чтобы увидеть доступные команды. Вы владелец, поэтому вам доступны все команды."
-  language_saved: "🌐 Язык сохранён"
+  requested_join: "💫 <b>Модуль</b> <code>{}</code> <b>просит вступить в канал <a href='https://t.me/{}'>{}</a></b>\n\n<b>❓ Причина:</b> <i>{}</i>"
+  joined: "💫 <b>Вы вступили в <a href='https://t.me/{}'>{}</a></b>"
+  declined: "✖️ <b>Вы отклонили вступление в <a href='https://t.me/{}'>{}</a></b>"
+  joined_toast: "Вы вступили в чат поддержки"
+  declined_toast: "Запрос на вступление отклонён"
+
+loader_restrictor:
+  name: "LoaderRestrictor"
+  q1: "На что способен любой модуль, который вы устанавливаете?"
+  q1_ans1: "Ровно то, что написано в его описании - не больше и не меньше"
+  q1_ans2: "Может читать переписку только в том чате, где его вызвали"
+  q1_ans3: "Может действовать только тогда, когда вы сами вызываете его команду"
+  q1_ans4: "То же самое, что и вы сами в Telegram, и даже больше: передача подарков, удаление аккаунта и т.д."
+  q1_hint: "Хотя в юзерботе стоит базовая защита от опасных запросов, модуль всё ещё может получить полное управление вашим аккаунтом"
+  q2: "Вам написал незнакомец и просит протестировать его модуль. Ваши действия?"
+  q2_ans1: "Конечно помогу ему, почему бы и нет?"
+  q2_ans2: "Проверю код (сам/нейросетью). При сомнениях напишу в саппорт с #check_scam, укажу, кто поделился"
+  q2_ans3: "Спрошу у самого автора, безопасен ли модуль, поверю ему на слово"
+  q2_ans4: "Установлю на другом аккаунте, чтобы протестировать, так безопаснее"
+  q2_hint: "Любые модули не из каналов официальных разработчиков ('#modules' в саппорте/чате оффтопа) стоит проверять на наличие опасного кода. Не подвергайте себя риску!"
+  q3: "Может ли модуль работать с файлами и системой сервера/хостинга, а не только с Telegram?"
+  q3_ans1: "Нет, модуль работает только внутри Telegram и не видит остальные файлы"
+  q3_ans2: "Только если у него есть отдельное разрешение от Telegram"
+  q3_ans3: "Да - модуль это часть самого юзербота: может читать, менять и удалять файлы, как и любая программа"
+  q3_ans4: "Только фото и видео из Telegram"
+  q3_hint: "Юзербот - это программа на Python, запущенная на вашем сервере. Модуль - часть этой программы с теми же правами"
+  q4: "Заметите ли вы, если модуль начнёт действовать без вашего разрешения (кража данных и т.д.)?"
+  q4_ans1: "Да, Telegram сразу пришлёт уведомление о подозрительной активности"
+  q4_ans2: "Да, я замечу подозрительные логи от модуля"
+  q4_ans3: "Нет, но базовая защита юзербота должна перехватить такую активность"
+  q4_ans4: "Не обязательно - модуль может действовать незаметно, без уведомлений, пока не станет поздно"
+  q4_hint: "Скрытность - главная опасность вредоносных модулей: без проверки кода заранее вы можете просто не заметить проблему, пока не станет поздно"
+  timeout: "<tg-emoji emoji-id=5447644880824181073>⚠️</tg-emoji> <b>Вы не успели ответить на все вопросы вовремя. Можете попробовать снова, отправив</b> <code>/start lm_verify</code>"
+  failed: "<tg-emoji emoji-id=5121063440311386962>❌</tg-emoji> <b>Ответ неверный. Чтобы разблокировать установку сторонних модулей, попробуйте снова, отправив</b> <code>/start lm_verify</code>"
+  already_passed: "<tg-emoji emoji-id=5118861066981344121>✅</tg-emoji> <b>Вы уже прошли проверку - установка сторонних модулей разблокирована</b>"
+  unlock_prompt: "<tg-emoji emoji-id=5447644880824181073>⚠️</tg-emoji> <b>Рекомендуем пройти проверку для разблокировки возможности установки сторонних модулей</b>"
+  unlock_prompt_btn: "Пройти проверку"
+  unlocked: "<tg-emoji emoji-id=5118861066981344121>✅</tg-emoji> <b>Проверка пройдена, установка сторонних модулей разблокирована</b>"

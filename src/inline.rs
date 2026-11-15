@@ -22,6 +22,7 @@ use grammers_client::Client;
 use grammers_mtsender::{SenderPool, SenderPoolFatHandle, UpdatesConfiguration};
 use grammers_session::storages::SqliteSession;
 use grammers_session::types::{PeerId, PeerRef};
+use grammers_tl_types as tl;
 use rand::Rng;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -193,6 +194,223 @@ impl InlineManager {
         Ok(())
     }
 
+    /// Send a quiz poll from the inline bot and return `(message_id, poll_id)`.
+    /// The poll id is assigned by Telegram, so it is read back from the sent
+    /// message; `LoaderRestrictor` needs it to match incoming votes.
+    pub async fn send_quiz_poll(
+        &self,
+        user_id: i64,
+        question: &str,
+        answers: &[String],
+        correct: i32,
+    ) -> Result<(i32, i64)> {
+        let runtime = self.runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            anyhow::bail!("inline bot is not running");
+        };
+        let peer = PeerId::from_bot_api_dialog_id(user_id)
+            .context("invalid Telegram user id")?
+            .to_ambient_ref();
+        let input: tl::enums::InputPeer = (&peer).into();
+
+        let parse = |text: &str| {
+            let (plain, entities) = grammers_client::parsers::parse_html_message(text);
+            tl::enums::TextWithEntities::Entities(tl::types::TextWithEntities {
+                text: plain,
+                entities,
+            })
+        };
+
+        let poll = tl::types::Poll {
+            id: 0,
+            closed: false,
+            public_voters: true,
+            multiple_choice: false,
+            quiz: true,
+            open_answers: false,
+            revoting_disabled: true,
+            shuffle_answers: false,
+            hide_results_until_close: false,
+            creator: false,
+            subscribers_only: false,
+            question: parse(question),
+            answers: answers
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    tl::enums::PollAnswer::Answer(tl::types::PollAnswer {
+                        text: parse(text),
+                        option: index.to_string().into_bytes(),
+                        media: None,
+                        added_by: None,
+                        date: None,
+                    })
+                })
+                .collect(),
+            close_period: Some(60),
+            close_date: None,
+            countries_iso2: None,
+            hash: 0,
+        };
+
+        let media = tl::enums::InputMedia::Poll(Box::new(tl::types::InputMediaPoll {
+            poll: tl::enums::Poll::Poll(poll),
+            correct_answers: Some(vec![correct]),
+            attached_media: None,
+            solution: None,
+            solution_entities: None,
+            solution_media: None,
+        }));
+
+        let random_id: i64 = rand::thread_rng().gen();
+        let response = runtime
+            .client
+            .invoke(&tl::functions::messages::SendMedia {
+                silent: true,
+                background: false,
+                clear_draft: false,
+                noforwards: false,
+                update_stickersets_order: false,
+                invert_media: false,
+                allow_paid_floodskip: false,
+                peer: input,
+                reply_to: None,
+                media,
+                message: String::new(),
+                random_id,
+                reply_markup: None,
+                entities: None,
+                schedule_date: None,
+                schedule_repeat_period: None,
+                send_as: None,
+                quick_reply_shortcut: None,
+                effect: None,
+                allow_paid_stars: None,
+                suggested_post: None,
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to send a quiz poll: {err}"))?;
+
+        let mut message_id = None;
+        let mut poll_id = None;
+        if let tl::enums::Updates::Updates(updates) = response {
+            for update in updates.updates {
+                if let tl::enums::Update::NewMessage(raw) = update {
+                    if let tl::enums::Message::Message(message) = raw.message {
+                        message_id.get_or_insert(message.id);
+                        if let Some(tl::enums::MessageMedia::Poll(poll)) = message.media {
+                            let tl::enums::Poll::Poll(inner) = poll.poll;
+                            poll_id = Some(inner.id);
+                        }
+                    }
+                }
+            }
+        }
+
+        match (message_id, poll_id) {
+            (Some(message_id), Some(poll_id)) => Ok((message_id, poll_id)),
+            _ => anyhow::bail!("Telegram did not return the quiz poll identifier"),
+        }
+    }
+
+    /// Delete messages previously sent by the inline bot to `user_id`.
+    pub async fn delete_bot_messages(&self, user_id: i64, ids: &[i32]) {
+        if ids.is_empty() {
+            return;
+        }
+        let runtime = self.runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            return;
+        };
+        let Some(peer) = PeerId::from_bot_api_dialog_id(user_id) else {
+            return;
+        };
+        let _ = runtime
+            .client
+            .delete_messages(peer.to_ambient_ref(), ids)
+            .await;
+    }
+
+    /// Send a photo card from the inline bot to a user. `photo` may be an
+    /// HTTP(S) URL, matching Python's `bot.send_photo(...)`.
+    pub async fn send_photo_to_user(
+        &self,
+        ctx: &Arc<Ctx>,
+        user_id: i64,
+        photo: &str,
+        html: String,
+        buttons: Vec<Vec<Button>>,
+    ) -> Result<()> {
+        let _ = ctx;
+        let runtime = self.runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            anyhow::bail!("inline bot is not running");
+        };
+        let peer = PeerId::from_bot_api_dialog_id(user_id)
+            .context("invalid Telegram user id")?
+            .to_ambient_ref();
+        runtime
+            .client
+            .send_message(
+                peer,
+                InputMessage::new()
+                    .photo_url(photo.to_owned())
+                    .html(html)
+                    .reply_markup(ReplyMarkup::from_buttons(&buttons)),
+            )
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to send an inline photo card: {err}"))?;
+        Ok(())
+    }
+
+    /// Send a document from the inline bot into a forum topic of the content
+    /// channel. Returns the message id. Mirrors Python's
+    /// `inline.bot.send_document(..., message_thread_id=...)`.
+    pub async fn send_document_to_channel(
+        &self,
+        ctx: &Arc<Ctx>,
+        channel_id: i64,
+        topic_id: i32,
+        path: &Path,
+        caption: String,
+        buttons: &[Vec<Button>],
+    ) -> Result<i32> {
+        let _ = ctx;
+        let runtime = self.runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            anyhow::bail!("inline bot is not running");
+        };
+
+        let mut dialogs = runtime.client.iter_dialogs();
+        let mut channel = None;
+        while let Ok(Some(dialog)) = dialogs.next().await {
+            if dialog.peer.id().bare_id_unchecked() == channel_id {
+                channel = Some(dialog.peer_ref());
+                break;
+            }
+        }
+        let channel = channel.context("the inline bot is not a member of the content channel")?;
+
+        let uploaded = runtime
+            .client
+            .upload_file(path)
+            .await
+            .with_context(|| format!("failed to upload {}", path.display()))?;
+        let sent = runtime
+            .client
+            .send_message(
+                channel,
+                InputMessage::new()
+                    .html(caption)
+                    .document(uploaded)
+                    .reply_to(Some(topic_id))
+                    .reply_markup(ReplyMarkup::from_buttons(buttons)),
+            )
+            .await
+            .context("failed to send the file from the inline bot")?;
+        Ok(sent.id())
+    }
+
     /// Send the configuration module picker from the inline bot.
     pub async fn send_config_page(&self, ctx: &Arc<Ctx>, user_id: i64) -> Result<()> {
         let (html, buttons) = config_list_card(ctx);
@@ -255,8 +473,9 @@ impl InlineManager {
             .send_message(
                 peer,
                 InputMessage::new()
-                    .html(ctx.tr("quickstart.text"))
-                    .reply_markup(welcome_markup()),
+                    .html(welcome_text(ctx))
+                    .link_preview(false)
+                    .reply_markup(welcome_markup(ctx)),
             )
             .await
             .map_err(|err| anyhow::anyhow!("failed to send the welcome card: {err}"))?;
@@ -476,6 +695,15 @@ impl InlineManager {
                     send.sender_id().bot_api_dialog_id_unchecked(),
                     send.text()
                 );
+            }
+            Update::Raw(raw) => {
+                if let tl::enums::Update::MessagePollVote(vote) = raw.raw {
+                    if let Err(err) =
+                        crate::modules::loader_restrictor::handle_poll_vote(ctx, &vote).await
+                    {
+                        debug!("Poll vote handler failed: {err:#}");
+                    }
+                }
             }
             _ => {}
         }
@@ -849,6 +1077,17 @@ impl InlineManager {
 
         if text == "/start" || text.starts_with("/start ") {
             self.clear_pending(sender);
+        }
+
+        // Python's `LoaderRestrictor` catches `/start lm_verify` in the bot PM.
+        if text == "/start lm_verify" {
+            let _ = client.delete_messages(peer, &[message.id()]).await;
+            if ctx.security.is_owner(sender) {
+                if let Err(err) = crate::modules::loader_restrictor::start_quiz(ctx).await {
+                    warn!("Failed to start the loader quiz: {err:#}");
+                }
+            }
+            return Ok(());
         }
 
         // `/start <param>` may be used by other modules later; ignore the init
@@ -1821,7 +2060,8 @@ impl InlineManager {
                 || data == "heroku:acc:add"
                 || data == "heroku:acc:default"
                 || data == "heroku:acc:resend"
-                || data.starts_with("heroku:acc:sw:") =>
+                || data.starts_with("heroku:acc:sw:")
+                || data.starts_with("heroku:acc:swc:") =>
             {
                 if !allowed {
                     let _ = call
@@ -1856,20 +2096,38 @@ impl InlineManager {
                 }
 
                 if data == "heroku:acc:default" {
-                    let html = crate::modules::web::switch_inline(ctx, "default").await;
-                    let buttons = vec![vec![Button::data("⬅️ Back", b"heroku:acc:list".to_vec())]];
+                    let (html, buttons) = crate::modules::web::switch_prompt(ctx, "default");
+                    let rows = buttons.unwrap_or_else(|| {
+                        vec![vec![Button::data("⬅️ Back", b"heroku:acc:list".to_vec())]]
+                    });
                     let _ = call
                         .answer()
                         .edit(
                             InputMessage::new()
                                 .html(html)
-                                .reply_markup(ReplyMarkup::from_buttons(&buttons)),
+                                .reply_markup(ReplyMarkup::from_buttons(&rows)),
                         )
                         .await;
                     return Ok(());
                 }
 
                 if let Some(id) = data.strip_prefix("heroku:acc:sw:") {
+                    let (html, buttons) = crate::modules::web::switch_prompt(ctx, id);
+                    let rows = buttons.unwrap_or_else(|| {
+                        vec![vec![Button::data("⬅️ Back", b"heroku:acc:list".to_vec())]]
+                    });
+                    let _ = call
+                        .answer()
+                        .edit(
+                            InputMessage::new()
+                                .html(html)
+                                .reply_markup(ReplyMarkup::from_buttons(&rows)),
+                        )
+                        .await;
+                    return Ok(());
+                }
+
+                if let Some(id) = data.strip_prefix("heroku:acc:swc:") {
                     let html = crate::modules::web::switch_inline(ctx, id).await;
                     let buttons = vec![vec![Button::data("⬅️ Back", b"heroku:acc:list".to_vec())]];
                     let _ = call
@@ -1893,6 +2151,23 @@ impl InlineManager {
                     )
                     .await;
             }
+            "heroku:lmverify" => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                let _ = call.answer().send().await;
+                if let Ok(message) = call.load_message().await {
+                    let _ = message.delete().await;
+                }
+                if let Err(err) = crate::modules::loader_restrictor::start_quiz(ctx).await {
+                    warn!("Failed to start the loader quiz: {err:#}");
+                }
+            }
             _ if data.starts_with("heroku:mod:") => {
                 if !allowed {
                     let _ = call
@@ -1906,6 +2181,43 @@ impl InlineManager {
                     let _ = call.answer().send().await;
                 }
             }
+            _ if data.starts_with("heroku:backupall:restore") => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                if let Err(err) =
+                    crate::modules::heroku_backup::handle_restore_callback(ctx, call, &data).await
+                {
+                    tracing::warn!("Backup restore callback failed: {err:#}");
+                    let _ = call.answer().send().await;
+                }
+            }
+            _ if data.starts_with("heroku:join:") => {
+                let mut parts = data.splitn(4, ':');
+                let _ = parts.next();
+                let _ = parts.next();
+                let action = parts.next().unwrap_or_default();
+                let username = parts.next().unwrap_or_default();
+                if username.is_empty() || !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                if let Err(err) =
+                    crate::content::handle_join_callback(ctx, call, action, username).await
+                {
+                    tracing::warn!("Join callback failed: {err:#}");
+                    let _ = call.answer().send().await;
+                }
+            }
             _ if data.starts_with("heroku:langwelcome/") => {
                 let code = crate::translations::canonical_lang(
                     data.trim_start_matches("heroku:langwelcome/"),
@@ -1914,8 +2226,9 @@ impl InlineManager {
                     ctx.translator.set_lang(&code);
                     ctx.db.set("heroku.translations", "lang", code);
                     let message = InputMessage::new()
-                        .html(ctx.tr("quickstart.text"))
-                        .reply_markup(welcome_markup());
+                        .html(welcome_text(ctx))
+                        .link_preview(false)
+                        .reply_markup(welcome_markup(ctx));
                     let _ = call
                         .answer()
                         .text(ctx.tr("quickstart.language_saved"))
@@ -2272,19 +2585,29 @@ fn prefix(ctx: &Ctx) -> String {
     }
 }
 
-fn welcome_markup() -> ReplyMarkup {
-    ReplyMarkup::from_buttons(&[
-        vec![Button::url("💬 Support", SUPPORT_URL)],
-        vec![
-            Button::data("🇬🇧 English", b"heroku:langwelcome/en".to_vec()),
-            Button::data("🇷🇺 Русский", b"heroku:langwelcome/ru".to_vec()),
-        ],
-        vec![
-            Button::data("🇺🇦 Українська", b"heroku:langwelcome/uk".to_vec()),
-            Button::data("🇩🇪 Deutsch", b"heroku:langwelcome/de".to_vec()),
-            Button::data("🇯🇵 日本語", b"heroku:langwelcome/ja".to_vec()),
-        ],
-    ])
+fn welcome_text(ctx: &Ctx) -> String {
+    ctx.tf("quickstart.base", &["Heroku"])
+}
+
+fn welcome_markup(ctx: &Ctx) -> ReplyMarkup {
+    let mut rows = vec![vec![Button::url(
+        ctx.tr("quickstart.btn_support"),
+        SUPPORT_URL,
+    )]];
+    let mut row = Vec::new();
+    for code in crate::translations::OFFICIAL_LANGUAGES {
+        row.push(Button::data(
+            ctx.translator.t_in(code, "quickstart.language"),
+            format!("heroku:langwelcome/{code}").into_bytes(),
+        ));
+        if row.len() == 3 {
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    ReplyMarkup::from_buttons(&rows)
 }
 
 fn random_id() -> String {

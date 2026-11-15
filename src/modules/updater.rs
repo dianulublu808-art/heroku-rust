@@ -19,7 +19,7 @@ use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, M
 use crate::tg::{escape_html, Msg};
 
 const DEFAULT_ORIGIN: &str = "https://github.com/dianulublu808-art/heroku-rust";
-const FETCH_INTERVAL: Duration = Duration::from_secs(300);
+const FETCH_INTERVAL: Duration = Duration::from_secs(60);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 static UPDATING: AtomicBool = AtomicBool::new(false);
@@ -86,12 +86,64 @@ impl Module for UpdaterMod {
                         }
                         ctx.db
                             .set("UpdaterMod", "last_notified", status.remote.clone());
+
+                        // Python applies minor updates automatically and only
+                        // asks the owner to update when the major version
+                        // changes. `cargo build` is expensive, so only do it
+                        // when the change is safe.
+                        let current_major = env!("CARGO_PKG_VERSION")
+                            .split('.')
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned();
+                        let remote_major = remote_version(&root, &status.branch).await;
+                        let minor_update = remote_major.as_deref().map(|version| {
+                            version.split('.').next() == Some(current_major.as_str())
+                        });
+
+                        if minor_update != Some(true) {
+                            let _ = ctx
+                                .send_self(ctx.tf(
+                                    "updater.major_update",
+                                    &[&status.behind.to_string(), &status.remote],
+                                ))
+                                .await;
+                            continue;
+                        }
+
                         let _ = ctx
-                            .send_self(ctx.tf(
-                                "updater.autoupdate_found",
-                                &[&status.behind.to_string(), &status.remote],
-                            ))
+                            .send_self(ctx.tf("updater.autoupdate_applying", &[&status.remote]))
                             .await;
+
+                        if UPDATING.swap(true, Ordering::SeqCst) {
+                            continue;
+                        }
+                        let task_ctx = ctx.clone();
+                        let task_root = root.clone();
+                        tokio::spawn(async move {
+                            let result = apply_update(&task_ctx, &task_root).await;
+                            UPDATING.store(false, Ordering::SeqCst);
+                            match result {
+                                Ok(()) => {
+                                    let _ =
+                                        task_ctx.send_self(task_ctx.tr("updater.updated")).await;
+                                    tokio::time::sleep(Duration::from_millis(800)).await;
+                                    if let Err(err) = crate::inline::restart_process() {
+                                        tracing::error!(
+                                            "Restart after the automatic update failed: {err}"
+                                        );
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = task_ctx
+                                        .send_self(task_ctx.tf(
+                                            "updater.update_failed",
+                                            &[&escape_html(&format!("{err:#}"))],
+                                        ))
+                                        .await;
+                                }
+                            }
+                        });
                     }
                     Ok(_) => {}
                     Err(err) => {
@@ -429,6 +481,31 @@ async fn update_status(root: &Path) -> Result<UpdateStatus> {
         branch,
         commits,
     })
+}
+
+/// Read the `version` field of `Cargo.toml` from the fetched remote branch.
+async fn remote_version(root: &Path, branch: &str) -> Option<String> {
+    let remote = git(root, &["show", &format!("origin/{branch}:Cargo.toml")])
+        .await
+        .ok()?;
+    let mut in_package = false;
+    for line in remote.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(value) = line.strip_prefix("version") {
+                let value = value.trim_start_matches([' ', '=']).trim();
+                let value = value.trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(value.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn apply_update(ctx: &Arc<Ctx>, root: &Path) -> Result<()> {

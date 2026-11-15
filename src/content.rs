@@ -417,3 +417,175 @@ fn first_message_id(updates: &tl::enums::Updates) -> Option<i32> {
         _ => None,
     })
 }
+
+/// Support chat every Heroku installation is asked to join.
+pub const SUPPORT_CHAT: &str = "heroku_talks";
+
+const JOIN_REQUEST_IMAGE: &str =
+    "https://raw.githubusercontent.com/Heroku-userbot/assets/refs/heads/main/join_request.jpg";
+
+/// Ask the owner to join `username`, mirroring Python's
+/// `client.request_join`. Returns `true` when the account already is a member.
+///
+/// The answer arrives through the inline buttons, so the function never blocks
+/// the startup sequence.
+pub async fn request_join(ctx: &Arc<Ctx>, username: &str, reason: &str) -> Result<bool> {
+    let Some(peer) = ctx
+        .client
+        .resolve_username(username)
+        .await
+        .with_context(|| format!("failed to resolve @{username}"))?
+    else {
+        debug!("Channel @{username} does not exist");
+        return Ok(false);
+    };
+    let Peer::Channel(channel) = &peer else {
+        debug!("@{username} is not a channel");
+        return Ok(false);
+    };
+    let bare_id = channel.raw.id;
+    let title = channel.raw.title.clone();
+    let username = channel
+        .raw
+        .username
+        .clone()
+        .unwrap_or_else(|| username.to_owned());
+
+    if ctx
+        .db
+        .get_i64_list("heroku.main", "declined_joins")
+        .contains(&bare_id)
+    {
+        return Ok(false);
+    }
+    if is_channel_member(ctx, bare_id).await {
+        return Ok(true);
+    }
+
+    let html = ctx.tf(
+        "quickstart.requested_join",
+        &[
+            "Quickstart",
+            &username,
+            &crate::tg::escape_html(&title),
+            &crate::tg::escape_html(reason),
+        ],
+    );
+    let buttons = vec![vec![
+        grammers_client::message::Button::data(
+            "💫 Approve",
+            format!("heroku:join:approve:{username}").into_bytes(),
+        ),
+        grammers_client::message::Button::data(
+            "✖️ Decline",
+            format!("heroku:join:decline:{username}").into_bytes(),
+        ),
+    ]];
+
+    match ctx
+        .inline
+        .send_photo_to_user(ctx, ctx.me_id, JOIN_REQUEST_IMAGE, html.clone(), buttons)
+        .await
+    {
+        Ok(()) => {}
+        Err(err) => {
+            debug!("Inline join request failed, falling back to a direct message: {err:#}");
+            ctx.send_self(html).await?;
+        }
+    }
+
+    Ok(false)
+}
+
+/// Handle the Approve/Decline buttons shown by [`request_join`].
+pub async fn handle_join_callback(
+    ctx: &Arc<Ctx>,
+    call: &grammers_client::update::CallbackQuery,
+    action: &str,
+    username: &str,
+) -> Result<()> {
+    let Some(peer) = ctx.client.resolve_username(username).await? else {
+        let _ = call.answer().alert("Channel not found").send().await;
+        return Ok(());
+    };
+    let Peer::Channel(channel) = &peer else {
+        let _ = call.answer().alert("Not a channel").send().await;
+        return Ok(());
+    };
+    let bare_id = channel.raw.id;
+    let title = channel.raw.title.clone();
+    let username = channel
+        .raw
+        .username
+        .clone()
+        .unwrap_or_else(|| username.to_owned());
+
+    if action == "approve" {
+        let Some(reference) = peer
+            .to_ref()
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to resolve the channel: {err}"))?
+        else {
+            let _ = call.answer().alert("Channel not found").send().await;
+            return Ok(());
+        };
+        let input: tl::enums::InputChannel = (&reference).into();
+        match ctx
+            .client
+            .invoke(&tl::functions::channels::JoinChannel { channel: input })
+            .await
+        {
+            Ok(_) => {
+                let html = ctx.tf(
+                    "quickstart.joined",
+                    &[&username, &crate::tg::escape_html(&title)],
+                );
+                let _ = call
+                    .answer()
+                    .text(ctx.tr("quickstart.joined_toast"))
+                    .edit(InputMessage::new().html(html))
+                    .await;
+            }
+            Err(err) => {
+                let _ = call
+                    .answer()
+                    .alert(format!("Failed to join: {err}"))
+                    .send()
+                    .await;
+            }
+        }
+        return Ok(());
+    }
+
+    let mut declined = ctx.db.get_i64_list("heroku.main", "declined_joins");
+    if !declined.contains(&bare_id) {
+        declined.push(bare_id);
+        ctx.db.set(
+            "heroku.main",
+            "declined_joins",
+            serde_json::Value::Array(declined.into_iter().map(serde_json::Value::from).collect()),
+        );
+    }
+    let html = ctx.tf(
+        "quickstart.declined",
+        &[&username, &crate::tg::escape_html(&title)],
+    );
+    let _ = call
+        .answer()
+        .text(ctx.tr("quickstart.declined_toast"))
+        .edit(InputMessage::new().html(html))
+        .await;
+    Ok(())
+}
+
+async fn is_channel_member(ctx: &Ctx, channel_id: i64) -> bool {
+    let mut dialogs = ctx.client.iter_dialogs();
+    while let Ok(Some(dialog)) = dialogs.next().await {
+        if let Peer::Channel(_) = &dialog.peer {
+            if dialog.peer.id().bare_id_unchecked() == channel_id {
+                return true;
+            }
+        }
+    }
+    false
+}

@@ -110,11 +110,31 @@ impl Module for LoaderMod {
         match command {
             "addrepo" => self.add_repo(ctx, message, args).await,
             "delrepo" => self.del_repo(ctx, message, args).await,
-            "dlmall" => self.download_all(ctx, message, args).await,
+            "dlmall" => {
+                if crate::modules::loader_restrictor::blocked(ctx, message).await {
+                    return Ok(());
+                }
+                self.download_all(ctx, message, args).await
+            }
             "ml" => self.send_module(ctx, message, args).await,
-            "dlmod" if args.get(0).is_none() => self.gallery(ctx, message, 0).await,
-            "dlmod" | "reloadmod" => self.install(ctx, message, args).await,
-            "loadmod" => self.load_url(ctx, message, args).await,
+            "dlmod" if args.get(0).is_none() => {
+                if crate::modules::loader_restrictor::blocked(ctx, message).await {
+                    return Ok(());
+                }
+                self.gallery(ctx, message, 0).await
+            }
+            "dlmod" | "reloadmod" => {
+                if crate::modules::loader_restrictor::blocked(ctx, message).await {
+                    return Ok(());
+                }
+                self.install(ctx, message, args).await
+            }
+            "loadmod" => {
+                if crate::modules::loader_restrictor::blocked(ctx, message).await {
+                    return Ok(());
+                }
+                self.load_url(ctx, message, args).await
+            }
             "unloadmod" => self.unload(ctx, message, args).await,
             "loadall" => self.load_all(ctx, message).await,
             "unloadall" => self.unload_all(ctx, message).await,
@@ -201,7 +221,22 @@ impl LoaderMod {
                     index + 1
                 ));
             }
-            message.reply_html(lines.join("\n")).await?;
+            let mut rows = Vec::new();
+            for (index, repo) in known.iter().enumerate() {
+                rows.push(vec![Button::data(
+                    repo_host(repo),
+                    format!("heroku:mod:repo:{index}").into_bytes(),
+                )]);
+            }
+            rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+            if ctx
+                .inline
+                .send_to_user(ctx, ctx.me_id, lines.join("\n"), rows)
+                .await
+                .is_err()
+            {
+                message.reply_html(lines.join("\n")).await?;
+            }
             return Ok(());
         };
 
@@ -261,6 +296,24 @@ impl LoaderMod {
             message.reply_html(ctx.tr("loader.args")).await?;
             return Ok(());
         };
+
+        // `.ml` sends a module file. Downloaded modules already live on disk,
+        // so prefer them over downloading the same file again.
+        if let Some(path) = find_local_module(ctx, name) {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("module.py")
+                .to_owned();
+            message
+                .respond_file(
+                    &ctx.client,
+                    &path,
+                    ctx.tf("loader.ml_ready", &[&escape_html(&file_name)]),
+                )
+                .await?;
+            return Ok(());
+        }
 
         message.reply_html(ctx.tr("loader.finding_module")).await?;
         let Some((repo, entry)) = find_module(ctx, name).await? else {
@@ -522,6 +575,10 @@ impl Module for LoaderRestrictor {
         "Control which downloaded modules are allowed"
     }
 
+    async fn on_load(&self, ctx: &Arc<Ctx>) -> Result<()> {
+        crate::modules::loader_restrictor::on_load(ctx).await
+    }
+
     fn commands(&self) -> Vec<CommandDef> {
         vec![
             CommandDef::new("allowmod", "Allow a module to be installed").usage("<module>"),
@@ -766,6 +823,16 @@ pub(crate) async fn handle_inline_callback(
     call: &CallbackQuery,
     data: &str,
 ) -> Result<bool> {
+    let installs = data.starts_with("heroku:mod:in:")
+        || data == "heroku:mod:all"
+        || data.starts_with("heroku:mod:repo:");
+    if installs {
+        if let Some(html) = crate::modules::loader_restrictor::blocked_inline(ctx).await {
+            let _ = call.answer().edit(InputMessage::new().html(html)).await;
+            return Ok(true);
+        }
+    }
+
     if data == "heroku:mod:list" || data.starts_with("heroku:mod:list:") {
         let page = data
             .strip_prefix("heroku:mod:list:")
@@ -891,6 +958,39 @@ pub(crate) async fn handle_inline_callback(
         return Ok(true);
     }
 
+    if let Some(raw_index) = data.strip_prefix("heroku:mod:repo:") {
+        let repo = raw_index
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| repos(ctx).get(index).cloned());
+        let Some(repo) = repo else {
+            let _ = call.answer().alert(ctx.tr("loader.no_repo")).send().await;
+            return Ok(true);
+        };
+        let _ = call
+            .answer()
+            .text(ctx.tf("loader.installing_all", &[&escape_html(&repo)]))
+            .send()
+            .await;
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let html = install_repo_all(&ctx, &repo).await;
+            let _ = ctx
+                .inline
+                .send_to_user(
+                    &ctx,
+                    ctx.me_id,
+                    html,
+                    vec![vec![
+                        Button::data(ctx.tr("loader.gallery_back"), b"heroku:mod:list:0".to_vec()),
+                        Button::data("✖️ Close", b"heroku:close".to_vec()),
+                    ]],
+                )
+                .await;
+        });
+        return Ok(true);
+    }
+
     if data == "heroku:mod:clear" {
         let html = ctx.tr("loader.confirm_clearmodules");
         let buttons = vec![
@@ -935,6 +1035,46 @@ pub(crate) async fn handle_inline_callback(
     }
 
     Ok(false)
+}
+
+async fn install_repo_all(ctx: &Arc<Ctx>, repo: &str) -> String {
+    let entries = match fetch_modules(ctx, repo).await {
+        Ok(entries) => entries,
+        Err(err) => {
+            return ctx.tf(
+                "loader.module_install_failed",
+                &[&escape_html(&format!("{err:#}"))],
+            )
+        }
+    };
+    if entries.is_empty() {
+        return ctx.tr("loader.no_modules_in_repo");
+    }
+
+    let mut installed = 0usize;
+    let mut failed = Vec::new();
+    for entry in entries {
+        match install_entry(ctx, repo, &entry).await {
+            Ok(_) => installed += 1,
+            Err(err) => failed.push(format!(
+                "▫️ <code>{}</code> — {}",
+                escape_html(&entry),
+                escape_html(&err.to_string())
+            )),
+        }
+    }
+
+    if failed.is_empty() {
+        ctx.tf("loader.installed_all", &[&installed.to_string()])
+    } else {
+        let mut text = ctx.tf(
+            "loader.installed_partial",
+            &[&installed.to_string(), &failed.len().to_string()],
+        );
+        text.push('\n');
+        text.push_str(&failed.join("\n"));
+        text
+    }
 }
 
 fn module_stem(entry: &str) -> String {

@@ -15,6 +15,7 @@ pub(crate) mod heroku_security;
 pub(crate) mod heroku_settings;
 mod inline;
 pub mod loader;
+pub(crate) mod loader_restrictor;
 mod quickstart;
 mod settings;
 pub(crate) mod terminal;

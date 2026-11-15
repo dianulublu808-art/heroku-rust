@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use grammers_tl_types as tl;
 use serde_json::Value;
 
 use crate::args::Args;
@@ -35,8 +36,8 @@ impl Module for Translator {
             ConfigSpec::new(
                 "provider",
                 "Translation provider",
-                ConfigDefault::Text("google"),
-                ConfigKind::Choice(&["google"]),
+                ConfigDefault::Text("telegram"),
+                ConfigKind::Choice(&["telegram", "google"]),
             ),
             ConfigSpec::new(
                 "only_text",
@@ -85,12 +86,32 @@ impl Module for Translator {
         }
 
         let text = text.unwrap_or_default();
-        let translated = match translate(&text, &lang).await {
-            Ok(text) => text,
-            Err(err) => {
-                tracing::warn!("Translation failed: {err:#}");
-                message.reply_html(ctx.tr("translate.error")).await?;
-                return Ok(());
+        let provider = ctx.db.get_str("Translator", "provider", "telegram");
+        let translated = if provider == "telegram" {
+            match translate_telegram(ctx, message, &text, &lang).await {
+                Ok(text) => text,
+                Err(err) => {
+                    // Some accounts cannot use Telegram's translator (e.g. no
+                    // premium or a region restriction); fall back to Google.
+                    tracing::debug!("Telegram translation failed, using Google: {err:#}");
+                    match translate(&text, &lang).await {
+                        Ok(text) => text,
+                        Err(err) => {
+                            tracing::warn!("Translation failed: {err:#}");
+                            message.reply_html(ctx.tr("translate.error")).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        } else {
+            match translate(&text, &lang).await {
+                Ok(text) => text,
+                Err(err) => {
+                    tracing::warn!("Translation failed: {err:#}");
+                    message.reply_html(ctx.tr("translate.error")).await?;
+                    return Ok(());
+                }
             }
         };
 
@@ -103,6 +124,45 @@ impl Module for Translator {
         message.reply_html(response).await?;
         Ok(())
     }
+}
+
+async fn translate_telegram(
+    ctx: &Arc<Ctx>,
+    message: &Msg,
+    text: &str,
+    lang: &str,
+) -> Result<String> {
+    let peer = message.peer_ref().await?;
+    let input: tl::enums::InputPeer = (&peer).into();
+    let response = ctx
+        .client
+        .invoke(&tl::functions::messages::TranslateText {
+            peer: Some(input),
+            id: None,
+            text: Some(vec![tl::enums::TextWithEntities::Entities(
+                tl::types::TextWithEntities {
+                    text: text.to_owned(),
+                    entities: Vec::new(),
+                },
+            )]),
+            to_lang: lang.to_owned(),
+            tone: None,
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("messages.translateText failed: {err}"))?;
+    let tl::enums::messages::TranslatedText::TranslateResult(result) = response;
+    let translated = result
+        .result
+        .into_iter()
+        .map(|entry| match entry {
+            tl::enums::TextWithEntities::Entities(text) => text.text,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if translated.trim().is_empty() {
+        anyhow::bail!("Telegram returned an empty translation");
+    }
+    Ok(translated)
 }
 
 async fn translate(text: &str, lang: &str) -> Result<String> {

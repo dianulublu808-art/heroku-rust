@@ -215,59 +215,21 @@ impl HerokuAccounts {
         };
 
         let target = raw.trim();
-        if target.eq_ignore_ascii_case("default")
-            || target.eq_ignore_ascii_case("main")
-            || target == "0"
-        {
-            let mut registry = registry;
-            registry.active = None;
-            registry.save(&ctx.data_root)?;
-            ctx.db.save();
-            message
-                .reply_html(ctx.tr("accounts.switching_default"))
-                .await?;
-            schedule_restart();
-            return Ok(());
-        }
-
-        let Some(account) = registry
-            .get(target)
-            .or_else(|| registry.get_by_phone(target))
-            .cloned()
-        else {
-            message
-                .reply_html(ctx.tf("accounts.not_found", &[&escape_html(target)]))
-                .await?;
+        let (html, buttons) = switch_prompt(ctx, target);
+        let Some(buttons) = buttons else {
+            message.reply_html(html).await?;
             return Ok(());
         };
-
-        let session = accounts::account_session_path(&ctx.data_root, &account.id);
-        if !session.exists() {
-            message
-                .reply_html(ctx.tf("accounts.session_missing", &[&escape_html(&account.id)]))
-                .await?;
+        if ctx
+            .inline
+            .send_to_user(ctx, ctx.me_id, html.clone(), buttons)
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
-
-        if account.tg_id == ctx.me_id {
-            message
-                .reply_html(ctx.tf("accounts.already_active", &[&escape_html(&account.name)]))
-                .await?;
-            return Ok(());
-        }
-
-        let mut registry = registry;
-        registry.active = Some(account.id.clone());
-        registry.save(&ctx.data_root)?;
-        seed_account_db(ctx, &account.id, account.tg_id);
-        ctx.db.save();
-        message
-            .reply_html(ctx.tf(
-                "accounts.switching",
-                &[&escape_html(&account.name), &escape_html(&account.id)],
-            ))
-            .await?;
-        schedule_restart();
+        // Inline bot unavailable: perform the switch right away.
+        message.reply_html(switch_inline(ctx, target).await).await?;
         Ok(())
     }
 
@@ -569,6 +531,68 @@ pub(crate) fn accounts_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
     (lines.join("\n"), rows)
 }
 
+/// Validate a switch target and build a confirmation card. Errors come back as
+/// ready-to-send HTML with no buttons.
+pub(crate) fn switch_prompt(ctx: &Arc<Ctx>, raw: &str) -> (String, Option<Vec<Vec<Button>>>) {
+    let registry = Registry::load(&ctx.data_root);
+    let target = raw.trim();
+
+    if target.eq_ignore_ascii_case("default")
+        || target.eq_ignore_ascii_case("main")
+        || target == "0"
+    {
+        return (
+            ctx.tr("accounts.switch_confirm_default"),
+            Some(vec![
+                vec![Button::data(
+                    ctx.tr("accounts.btn_yes"),
+                    b"heroku:acc:swc:default".to_vec(),
+                )],
+                vec![Button::data(
+                    ctx.tr("accounts.btn_no"),
+                    b"heroku:acc:list".to_vec(),
+                )],
+            ]),
+        );
+    }
+
+    let Some(account) = registry
+        .get(target)
+        .or_else(|| registry.get_by_phone(target))
+        .cloned()
+    else {
+        return (ctx.tf("accounts.not_found", &[&escape_html(target)]), None);
+    };
+
+    let session = accounts::account_session_path(&ctx.data_root, &account.id);
+    if !session.exists() {
+        return (
+            ctx.tf("accounts.session_missing", &[&escape_html(&account.id)]),
+            None,
+        );
+    }
+    if account.tg_id == ctx.me_id {
+        return (
+            ctx.tf("accounts.already_active", &[&escape_html(&account.name)]),
+            None,
+        );
+    }
+
+    (
+        ctx.tr("accounts.switch_confirm"),
+        Some(vec![
+            vec![Button::data(
+                ctx.tr("accounts.btn_yes"),
+                format!("heroku:acc:swc:{}", account.id).into_bytes(),
+            )],
+            vec![Button::data(
+                ctx.tr("accounts.btn_no"),
+                b"heroku:acc:list".to_vec(),
+            )],
+        ]),
+    )
+}
+
 /// Switch the active account from an inline callback and return the card text.
 pub(crate) async fn switch_inline(ctx: &Arc<Ctx>, raw: &str) -> String {
     let registry = Registry::load(&ctx.data_root);
@@ -729,6 +753,19 @@ fn seed_account_db(ctx: &Arc<Ctx>, id: &str, tg_id: i64) {
         crate::security::NS,
         "owner",
         serde_json::Value::Array(owners.into_iter().map(serde_json::Value::from).collect()),
+    );
+
+    // `all_users` contains everyone who ever used the userbot. Keep the old
+    // account but make sure the new one is present too.
+    let mut all_users = target.get_i64_list(crate::security::NS, "all_users");
+    all_users.retain(|user| *user != ctx.me_id);
+    if tg_id != 0 && !all_users.contains(&tg_id) {
+        all_users.push(tg_id);
+    }
+    target.set_value(
+        crate::security::NS,
+        "all_users",
+        serde_json::Value::Array(all_users.into_iter().map(serde_json::Value::from).collect()),
     );
 
     // Never reuse the inline bot token across accounts.

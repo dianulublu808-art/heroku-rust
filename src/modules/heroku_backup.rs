@@ -21,6 +21,9 @@ use crate::ziparch;
 
 pub struct HerokuBackupMod;
 
+const PERIOD_IMAGE: &str =
+    "https://raw.githubusercontent.com/Heroku-userbot/assets/refs/heads/main/unit_alpha.jpg";
+
 #[async_trait]
 impl Module for HerokuBackupMod {
     fn name(&self) -> &'static str {
@@ -56,6 +59,30 @@ impl Module for HerokuBackupMod {
     }
 
     async fn on_load(&self, ctx: &Arc<Ctx>) -> Result<()> {
+        // Python's `inline_ready` proposes the backup period on the first run
+        // with the `unit_alpha.jpg` photo card. The prompt is skipped once the
+        // owner has picked a period (including "Never", stored as 0).
+        if ctx.db.get_value("HerokuBackupMod", "period").is_none() {
+            let setup_ctx = ctx.clone();
+            tokio::spawn(async move {
+                let (html, buttons) = period_prompt_card(&setup_ctx);
+                if setup_ctx
+                    .inline
+                    .send_photo_to_user(
+                        &setup_ctx,
+                        setup_ctx.me_id,
+                        PERIOD_IMAGE,
+                        html.clone(),
+                        buttons,
+                    )
+                    .await
+                    .is_err()
+                {
+                    let _ = setup_ctx.send_self(html).await;
+                }
+            });
+        }
+
         let ctx = ctx.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
@@ -74,7 +101,7 @@ impl Module for HerokuBackupMod {
                 match create_backup(&ctx) {
                     Ok(path) => {
                         let caption = ctx.tr("backup.auto_caption");
-                        match send_backup_to_channel(&ctx, &path, caption).await {
+                        match send_backup_to_channel(&ctx, &path, caption, Vec::new()).await {
                             Ok(Some(link)) => {
                                 let _ =
                                     ctx.send_self(ctx.tf("backup.sent_channel", &[&link])).await;
@@ -105,7 +132,7 @@ impl Module for HerokuBackupMod {
                 let path = create_backup(ctx)?;
                 let prefix = ctx.prefixes(ctx.me_id).first().cloned().unwrap_or_default();
                 let caption = ctx.tf("backup.channel_caption", &[&escape_html(&prefix)]);
-                match send_backup_to_channel(ctx, &path, caption).await {
+                match send_backup_to_channel(ctx, &path, caption, Vec::new()).await {
                     Ok(Some(link)) => {
                         message
                             .reply_html(ctx.tf("backup.sent_channel", &[&link]))
@@ -175,47 +202,25 @@ impl HerokuBackupMod {
             .await?;
 
         let modules = local_module_files(ctx);
-        let mut archive = serde_json::Map::new();
-        archive.insert(
-            "modules".to_owned(),
-            Value::Object(
-                modules
-                    .iter()
-                    .map(|(name, content)| (name.clone(), Value::String(content.clone())))
-                    .collect(),
-            ),
-        );
-        archive.insert(
-            "primary_repo".to_owned(),
-            Value::String(ctx.db.get_str("LoaderMod", "MODULES_REPO", "")),
-        );
-        archive.insert(
-            "repos".to_owned(),
-            Value::Array(
-                ctx.db
-                    .get_string_list("LoaderMod", "ADDITIONAL_REPOS")
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        archive.insert(
-            "basic_auth".to_owned(),
-            Value::String(ctx.db.get_str("LoaderMod", "basic_auth", "")),
-        );
+        let mut entries: Vec<(String, Vec<u8>)> = modules
+            .iter()
+            .map(|(name, content)| (name.clone(), content.as_bytes().to_vec()))
+            .collect();
+        entries.push((
+            "db_mods.json".to_owned(),
+            serde_json::to_vec_pretty(&loaded_modules(ctx))?,
+        ));
+        let archive = ziparch::write_zip(&entries);
 
         let dir = PathBuf::from(&ctx.data_root).join("backups");
         std::fs::create_dir_all(&dir)?;
-        let name = format!("mods-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let name = format!("mods-{}.zip", chrono::Local::now().format("%d-%m-%Y-%H-%M"));
         let path = dir.join(name);
-        crate::config::write_private(
-            &path,
-            serde_json::to_string_pretty(&Value::Object(archive))?.as_bytes(),
-        )?;
+        crate::config::write_private(&path, &archive)?;
 
         let count = modules.len().to_string();
         let caption = ctx.tf("backup.modules_backup", &[&count]);
-        match send_backup_to_channel(ctx, &path, caption.clone()).await {
+        match send_backup_to_channel(ctx, &path, caption.clone(), Vec::new()).await {
             Ok(Some(link)) => {
                 message
                     .reply_html(ctx.tf("backup.sent_channel", &[&link]))
@@ -232,28 +237,38 @@ impl HerokuBackupMod {
         message.reply_html(ctx.tr("backup.creating_all")).await?;
 
         let modules = local_module_files(ctx);
-        let mut entries = vec![("db.json".to_owned(), ctx.db.dump_pretty().into_bytes())];
-        for (name, content) in &modules {
-            entries.push((format!("modules/{name}"), content.as_bytes().to_vec()));
-        }
-        entries.push((
-            "loader.json".to_owned(),
-            serde_json::to_vec_pretty(&loader_config(ctx))?,
+        let mut mods_entries: Vec<(String, Vec<u8>)> = modules
+            .iter()
+            .map(|(name, content)| (name.clone(), content.as_bytes().to_vec()))
+            .collect();
+        mods_entries.push((
+            "db_mods.json".to_owned(),
+            serde_json::to_vec_pretty(&loaded_modules(ctx))?,
         ));
+        let mods_zip = ziparch::write_zip(&mods_entries);
+
+        let entries = vec![
+            ("db.json".to_owned(), ctx.db.dump_pretty().into_bytes()),
+            ("mods.zip".to_owned(), mods_zip),
+        ];
 
         let archive = ziparch::write_zip(&entries);
         let dir = PathBuf::from(&ctx.data_root).join("backups");
         std::fs::create_dir_all(&dir)?;
         let name = format!(
-            "heroku-{}.backup",
-            chrono::Local::now().format("%Y%m%d-%H%M%S")
+            "backup-{}.backup",
+            chrono::Local::now().format("%d-%m-%Y-%H-%M")
         );
         let path = dir.join(name);
         crate::config::write_private(&path, &archive)?;
 
         let prefix = ctx.prefixes(ctx.me_id).first().cloned().unwrap_or_default();
         let caption = ctx.tf("backup.channel_all_caption", &[&escape_html(&prefix)]);
-        match send_backup_to_channel(ctx, &path, caption).await {
+        let buttons = vec![vec![Button::data(
+            "↪️ Restore this",
+            b"heroku:backupall:restore:confirm".to_vec(),
+        )]];
+        match send_backup_to_channel(ctx, &path, caption, buttons).await {
             Ok(Some(link)) => {
                 message
                     .reply_html(ctx.tf("backup.all_sent_channel", &[&link]))
@@ -284,7 +299,7 @@ impl HerokuBackupMod {
 
         let path = PathBuf::from(&ctx.data_root)
             .join("backups")
-            .join(format!("restore-mods-{}.json", message.id()));
+            .join(format!("restore-mods-{}.archive", message.id()));
         message
             .reply_html(ctx.tr("backup.restoring_modules"))
             .await?;
@@ -292,32 +307,46 @@ impl HerokuBackupMod {
             .download_media(&path)
             .await
             .context("failed to download the modules archive")?;
-        let raw = tokio::fs::read_to_string(&path)
+        let raw = tokio::fs::read(&path)
             .await
             .context("failed to read the modules archive")?;
         let _ = tokio::fs::remove_file(&path).await;
-        let value: Value = serde_json::from_str(&raw).context("invalid modules archive")?;
 
-        let (modules, primary_repo, repos, basic_auth) = parse_modules_archive(&value)?;
-        let restored = restore_module_files(ctx, &modules)?;
-
-        if let Some(repo) = primary_repo {
-            ctx.db.set("LoaderMod", "MODULES_REPO", repo);
-        }
-        if let Some(repos) = repos {
-            ctx.db.set(
-                "LoaderMod",
-                "ADDITIONAL_REPOS",
-                Value::Array(repos.into_iter().map(Value::String).collect()),
-            );
-        }
-        if let Some(auth) = basic_auth {
-            ctx.db.set("LoaderMod", "basic_auth", auth);
-        }
+        // Python's `backupmods` produces a ZIP, while older Rust builds wrote
+        // a JSON object with the same data. Accept both formats.
+        let restored = if raw.starts_with(b"PK\x03\x04") {
+            restore_modules_zip(ctx, &raw)?
+        } else {
+            let value: Value = serde_json::from_slice(&raw).context("invalid modules archive")?;
+            if value.get("modules").is_some() {
+                let (modules, primary_repo, repos, basic_auth) = parse_modules_archive(&value)?;
+                let restored = restore_module_files(ctx, &modules)?;
+                if let Some(repo) = primary_repo {
+                    ctx.db.set("LoaderMod", "MODULES_REPO", repo);
+                }
+                if let Some(repos) = repos {
+                    ctx.db.set(
+                        "LoaderMod",
+                        "ADDITIONAL_REPOS",
+                        Value::Array(repos.into_iter().map(Value::String).collect()),
+                    );
+                }
+                if let Some(auth) = basic_auth {
+                    ctx.db.set("LoaderMod", "basic_auth", auth);
+                }
+                restored
+            } else if restore_loaded_modules(ctx, &value) {
+                0
+            } else {
+                message.reply_html(ctx.tr("backup.bad_file")).await?;
+                return Ok(());
+            }
+        };
 
         message
             .reply_html(ctx.tf("backup.mods_restored", &[&restored.to_string()]))
             .await?;
+        schedule_restart();
         Ok(())
     }
 
@@ -365,67 +394,8 @@ impl HerokuBackupMod {
         let _ = tokio::fs::remove_file(&path).await;
 
         if raw.starts_with(b"PK\x03\x04") {
-            let mut entries = ziparch::read_zip(&raw).context("invalid backup archive")?;
-            let db = entries
-                .remove("db.json")
-                .or_else(|| entries.remove("database.json"));
-            let loader = entries.remove("loader.json");
-            let nested = entries.remove("mods.zip");
-
-            let mut modules = BTreeMap::new();
-            if let Some(nested) = nested {
-                match ziparch::read_zip(&nested) {
-                    Ok(files) => {
-                        for (name, content) in files {
-                            if name == "db_mods.json" || name.ends_with('/') {
-                                continue;
-                            }
-                            let Some(name) = PathBuf::from(&name)
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .map(ToOwned::to_owned)
-                            else {
-                                continue;
-                            };
-                            modules.insert(name, String::from_utf8_lossy(&content).into_owned());
-                        }
-                    }
-                    Err(err) => tracing::warn!("Failed to read nested mods.zip: {err:#}"),
-                }
-            }
-            for (name, content) in entries {
-                let Some(name) = name.strip_prefix("modules/") else {
-                    continue;
-                };
-                let Some(name) = PathBuf::from(name)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(ToOwned::to_owned)
-                else {
-                    continue;
-                };
-                modules.insert(name, String::from_utf8_lossy(&content).into_owned());
-            }
-
-            let mut restored_db = false;
-            if let Some(db) = db {
-                match serde_json::from_slice::<Value>(&db) {
-                    Ok(value) if value.is_object() => {
-                        ctx.db.restore(sanitize_db(value));
-                        restored_db = true;
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::warn!("Invalid database in backup: {err}"),
-                }
-            }
-            if let Some(loader) = loader {
-                if let Ok(value) = serde_json::from_slice::<Value>(&loader) {
-                    apply_loader_config(ctx, &value);
-                }
-            }
-            let restored_modules = restore_module_files(ctx, &modules)?;
-
-            if !restored_db && restored_modules == 0 {
+            let outcome = apply_full_archive(ctx, &raw)?;
+            if !outcome.database && outcome.modules == 0 && !outcome.mods {
                 message.reply_html(ctx.tr("backup.bad_file")).await?;
                 return Ok(());
             }
@@ -434,12 +404,12 @@ impl HerokuBackupMod {
                 .reply_html(ctx.tf(
                     "backup.all_restored",
                     &[
-                        if restored_db { "yes" } else { "no" },
-                        &restored_modules.to_string(),
+                        if outcome.database { "yes" } else { "no" },
+                        &outcome.modules.to_string(),
                     ],
                 ))
                 .await?;
-            if restored_db {
+            if outcome.database {
                 schedule_restart();
             }
             return Ok(());
@@ -531,6 +501,9 @@ fn local_module_files(ctx: &Arc<Ctx>) -> BTreeMap<String, String> {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
+            if !is_module_file(name) {
+                continue;
+            }
             let Ok(raw) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -540,27 +513,62 @@ fn local_module_files(ctx: &Arc<Ctx>) -> BTreeMap<String, String> {
     modules
 }
 
-fn loader_config(ctx: &Arc<Ctx>) -> Value {
-    let mut object = serde_json::Map::new();
-    object.insert(
-        "primary_repo".to_owned(),
-        Value::String(ctx.db.get_str("LoaderMod", "MODULES_REPO", "")),
-    );
-    object.insert(
-        "repos".to_owned(),
-        Value::Array(
-            ctx.db
-                .get_string_list("LoaderMod", "ADDITIONAL_REPOS")
-                .into_iter()
-                .map(Value::String)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "basic_auth".to_owned(),
-        Value::String(ctx.db.get_str("LoaderMod", "basic_auth", "")),
-    );
-    Value::Object(object)
+fn is_module_file(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && !name.ends_with('/')
+        && (name.ends_with(".py") || name.ends_with(".rhai"))
+        && name != "db_mods.json"
+}
+
+/// Python-compatible `LoaderMod.loaded_modules` mapping (module -> source URL).
+fn loaded_modules(ctx: &Ctx) -> Value {
+    match ctx.db.get_value("LoaderMod", "loaded_modules") {
+        Some(Value::Object(map)) => Value::Object(map),
+        _ => Value::Object(serde_json::Map::new()),
+    }
+}
+
+/// Store `loaded_modules` from a `db_mods.json` payload. Returns `true` when
+/// the payload was a valid mapping of strings.
+fn restore_loaded_modules(ctx: &Ctx, value: &Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    if !map.values().all(Value::is_string) {
+        return false;
+    }
+    ctx.db
+        .set("LoaderMod", "loaded_modules", Value::Object(map.clone()));
+    true
+}
+
+fn restore_modules_zip(ctx: &Arc<Ctx>, raw: &[u8]) -> Result<usize> {
+    let mut entries = ziparch::read_zip(raw).context("invalid modules archive")?;
+    if let Some(mods) = entries.remove("db_mods.json") {
+        if let Ok(value) = serde_json::from_slice::<Value>(&mods) {
+            restore_loaded_modules(ctx, &value);
+        }
+    }
+
+    let mut modules = BTreeMap::new();
+    for (name, content) in entries {
+        if !is_module_file(&name) {
+            continue;
+        }
+        let Some(name) = PathBuf::from(&name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        modules.insert(name, String::from_utf8_lossy(&content).into_owned());
+    }
+    if modules.is_empty() {
+        anyhow::bail!("archive contains no modules");
+    }
+    restore_module_files(ctx, &modules)
 }
 
 fn apply_loader_config(ctx: &Arc<Ctx>, value: &Value) {
@@ -660,10 +668,154 @@ fn parse_modules_archive(value: &Value) -> Result<ModulesArchive> {
     Ok((modules, primary_repo, repos, basic_auth))
 }
 
+pub(crate) struct FullRestore {
+    database: bool,
+    modules: usize,
+    mods: bool,
+}
+
+fn apply_full_archive(ctx: &Arc<Ctx>, raw: &[u8]) -> Result<FullRestore> {
+    let mut entries = ziparch::read_zip(raw).context("invalid backup archive")?;
+    let db = entries
+        .remove("db.json")
+        .or_else(|| entries.remove("database.json"));
+    let loader = entries.remove("loader.json");
+    let nested = entries.remove("mods.zip");
+
+    let mut modules = BTreeMap::new();
+    let mut db_mods: Option<Value> = None;
+    if let Some(nested) = nested {
+        match ziparch::read_zip(&nested) {
+            Ok(mut files) => {
+                if let Some(raw) = files.remove("db_mods.json") {
+                    db_mods = serde_json::from_slice::<Value>(&raw).ok();
+                }
+                for (name, content) in files {
+                    if !is_module_file(&name) {
+                        continue;
+                    }
+                    let Some(name) = PathBuf::from(&name)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(ToOwned::to_owned)
+                    else {
+                        continue;
+                    };
+                    modules.insert(name, String::from_utf8_lossy(&content).into_owned());
+                }
+            }
+            Err(err) => tracing::warn!("Failed to read nested mods.zip: {err:#}"),
+        }
+    }
+    // Older Rust backups stored modules as `modules/<name>` entries.
+    for (name, content) in entries {
+        let Some(name) = name.strip_prefix("modules/") else {
+            continue;
+        };
+        if !is_module_file(name) {
+            continue;
+        }
+        let Some(name) = PathBuf::from(name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        modules.insert(name, String::from_utf8_lossy(&content).into_owned());
+    }
+
+    let mut database = false;
+    if let Some(db) = db {
+        match serde_json::from_slice::<Value>(&db) {
+            Ok(value) if value.is_object() => {
+                ctx.db.restore(sanitize_db(value));
+                database = true;
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!("Invalid database in backup: {err}"),
+        }
+    }
+    if let Some(loader) = loader {
+        if let Ok(value) = serde_json::from_slice::<Value>(&loader) {
+            apply_loader_config(ctx, &value);
+        }
+    }
+    // `db_mods.json` must be applied after the database restore, because
+    // restoring replaces the whole database.
+    let mods = db_mods
+        .as_ref()
+        .map(|value| restore_loaded_modules(ctx, value))
+        .unwrap_or(false);
+    let modules = restore_module_files(ctx, &modules)?;
+
+    Ok(FullRestore {
+        database,
+        modules,
+        mods,
+    })
+}
+
+/// Handle `heroku:backupall:restore[:confirm]` pressed on a backup file that
+/// the inline bot posted into the Backups topic.
+pub(crate) async fn handle_restore_callback(
+    ctx: &Arc<Ctx>,
+    call: &grammers_client::update::CallbackQuery,
+    data: &str,
+) -> Result<()> {
+    if data == "heroku:backupall:restore:confirm" {
+        let markup = grammers_client::message::ReplyMarkup::from_buttons(&[vec![Button::data(
+            ctx.tr("backup.confirm_yes"),
+            b"heroku:backupall:restore".to_vec(),
+        )]]);
+        let _ = call
+            .answer()
+            .edit(
+                grammers_client::message::InputMessage::new()
+                    .html(ctx.tr("backup.confirm_restore"))
+                    .reply_markup(markup),
+            )
+            .await;
+        return Ok(());
+    }
+
+    let message = call.load_message().await?;
+    let path = PathBuf::from(&ctx.data_root)
+        .join("backups")
+        .join(format!("restore-callback-{}.backup", message.id()));
+    if let Err(err) = message.download_media(&path).await {
+        tracing::warn!("Failed to download the channel backup: {err:#}");
+        let _ = call.answer().alert(ctx.tr("backup.no_file")).send().await;
+        return Ok(());
+    }
+    let raw = tokio::fs::read(&path)
+        .await
+        .context("failed to read the channel backup")?;
+    let _ = tokio::fs::remove_file(&path).await;
+
+    match apply_full_archive(ctx, &raw) {
+        Ok(outcome) if outcome.database || outcome.modules > 0 || outcome.mods => {
+            let _ = call
+                .answer()
+                .text(ctx.tr("backup.all_restored_bot"))
+                .send()
+                .await;
+            if outcome.database {
+                schedule_restart();
+            }
+        }
+        _ => {
+            let _ = call.answer().alert(ctx.tr("backup.bad_file")).send().await;
+        }
+    }
+    Ok(())
+}
+
 async fn send_backup_to_channel(
     ctx: &Arc<Ctx>,
     path: &std::path::Path,
     caption: String,
+    buttons: Vec<Vec<Button>>,
 ) -> Result<Option<String>> {
     let channel = crate::content::ensure_content_channel(ctx).await?;
     let topic = crate::content::ensure_topic(
@@ -672,23 +824,41 @@ async fn send_backup_to_channel(
         crate::content::TOPIC_BACKUPS_DESCRIPTION,
     )
     .await?;
+    let channel_id = channel.id.bare_id_unchecked();
+
+    // Python always uploads backups with the inline bot, so the "Restore this"
+    // button keeps working even after a userbot restart.
+    match ctx
+        .inline
+        .send_document_to_channel(ctx, channel_id, topic, path, caption.clone(), &buttons)
+        .await
+    {
+        Ok(id) => return Ok(Some(format!("https://t.me/c/{channel_id}/{topic}/{id}"))),
+        Err(err) => {
+            tracing::debug!("Inline bot could not send the backup, falling back: {err:#}");
+        }
+    }
 
     let uploaded = ctx
         .client
         .upload_file(path)
         .await
         .with_context(|| format!("failed to upload {}", path.display()))?;
-    let message = grammers_client::message::InputMessage::new()
+    let mut input = grammers_client::message::InputMessage::new()
         .html(caption)
         .document(uploaded)
         .reply_to(Some(topic));
+    if !buttons.is_empty() {
+        input = input.reply_markup(grammers_client::message::ReplyMarkup::from_buttons(
+            &buttons,
+        ));
+    }
     let sent = ctx
         .client
-        .send_message(channel, message)
+        .send_message(channel, input)
         .await
         .context("failed to send the backup to the content channel")?;
 
-    let channel_id = channel.id.bare_id_unchecked();
     Ok(Some(format!(
         "https://t.me/c/{channel_id}/{topic}/{}",
         sent.id()
@@ -699,8 +869,8 @@ fn create_backup(ctx: &Arc<Ctx>) -> Result<PathBuf> {
     let dir = PathBuf::from(&ctx.data_root).join("backups");
     std::fs::create_dir_all(&dir)?;
     let name = format!(
-        "heroku-{}.json",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
+        "db-backup-{}.json",
+        chrono::Local::now().format("%d-%m-%Y-%H-%M")
     );
     let path = dir.join(name);
     let raw = ctx.db.dump_pretty();
@@ -736,15 +906,7 @@ fn apply_period(ctx: &Ctx, hours: i64) -> String {
     }
 }
 
-pub(crate) fn period_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
-    let seconds = backup_period(ctx);
-    let current = if seconds > 0 {
-        ctx.tf("backup.period_hours", &[&(seconds / 3600).to_string()])
-    } else {
-        ctx.tr("backup.period_never")
-    };
-    let html = ctx.tf("backup.period_title", &[&current]);
-
+fn period_buttons(ctx: &Arc<Ctx>, with_close: bool) -> Vec<Vec<Button>> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
     for hours in [1_i64, 2, 4, 6, 8, 12, 24, 48, 168] {
@@ -763,8 +925,26 @@ pub(crate) fn period_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
         ctx.tr("backup.btn_never"),
         b"heroku:backup:period:0".to_vec(),
     )]);
-    rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
-    (html, rows)
+    if with_close {
+        rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+    }
+    rows
+}
+
+/// First-run prompt mirroring Python's `inline_ready` photo card.
+pub(crate) fn period_prompt_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    (ctx.tr("backup.period_prompt"), period_buttons(ctx, false))
+}
+
+pub(crate) fn period_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let seconds = backup_period(ctx);
+    let current = if seconds > 0 {
+        ctx.tf("backup.period_hours", &[&(seconds / 3600).to_string()])
+    } else {
+        ctx.tr("backup.period_never")
+    };
+    let html = ctx.tf("backup.period_title", &[&current]);
+    (html, period_buttons(ctx, true))
 }
 
 pub(crate) fn set_period_from_inline(ctx: &Arc<Ctx>, hours: i64) -> (String, Vec<Vec<Button>>) {

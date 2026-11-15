@@ -13,6 +13,8 @@ use crate::ctx::Ctx;
 use crate::module::{CommandDef, Module, ModuleFactory};
 use crate::tg::Msg;
 
+const JOIN_REASON: &str = "Heroku help is only available in this chat. By agreeing to join the chat, you agree to the Heroku federation rules and if you violate them, you will be permanently banned.";
+
 pub struct Quickstart;
 
 #[async_trait]
@@ -39,7 +41,22 @@ impl Module for Quickstart {
             }
         });
 
-        if ctx.db.get_bool("Quickstart", "sent", false) {
+        // Python's `client_ready` also asks the owner to join the support chat.
+        let join_ctx = ctx.clone();
+        tokio::spawn(async move {
+            match crate::content::request_join(&join_ctx, crate::content::SUPPORT_CHAT, JOIN_REASON)
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => tracing::warn!("Failed to request joining the support chat: {err:#}"),
+            }
+        });
+
+        // Python stores the flag as `no_msg`; honour it so a migrated database
+        // does not show the welcome card again.
+        let already_sent = ctx.db.get_bool("Quickstart", "sent", false)
+            || ctx.db.get_bool("Quickstart", "no_msg", false);
+        if already_sent {
             return Ok(());
         }
 
@@ -48,11 +65,14 @@ impl Module for Quickstart {
         // the owner yet, fall back to a normal userbot message.
         if ctx.inline.send_welcome(ctx, ctx.me_id).await.is_ok() {
             ctx.db.set("Quickstart", "sent", true);
+            ctx.db.set("Quickstart", "no_msg", true);
             return Ok(());
         }
 
-        ctx.send_self(ctx.tr("quickstart.text")).await?;
+        ctx.send_self(ctx.tf("quickstart.base", &["Heroku"]))
+            .await?;
         ctx.db.set("Quickstart", "sent", true);
+        ctx.db.set("Quickstart", "no_msg", true);
         Ok(())
     }
 

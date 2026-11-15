@@ -149,6 +149,18 @@ impl Translator {
         value.unwrap_or_else(|| key.to_owned())
     }
 
+    /// Translate a dotted key using a specific shipped language pack. Used by
+    /// the language picker, which labels every button in its own language.
+    pub fn t_in(&self, lang: &str, key: &str) -> String {
+        let code = normalize_lang(lang);
+        self.packs
+            .get(&code)
+            .and_then(|pack| pack.get(key))
+            .or_else(|| self.packs.get("en").and_then(|pack| pack.get(key)))
+            .cloned()
+            .unwrap_or_else(|| key.to_owned())
+    }
+
     /// Translate and replace `{}` placeholders in order.
     pub fn tf(&self, key: &str, values: &[&str]) -> String {
         let mut text = self.t(key);
@@ -278,6 +290,18 @@ fn flatten_json(prefix: &str, value: &serde_json::Value, out: &mut HashMap<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn localized_packs_cover_every_key() {
+        let en = load_pack(EN);
+        assert!(en.len() > 400, "unexpectedly small English pack");
+        for (code, raw) in [("ru", RU), ("uk", UK), ("de", DE), ("ja", JA)] {
+            let pack = load_pack(raw);
+            for key in en.keys() {
+                assert!(pack.contains_key(key), "{code} misses {key}");
+            }
+        }
+    }
 
     #[test]
     fn flattens_and_formats() {
