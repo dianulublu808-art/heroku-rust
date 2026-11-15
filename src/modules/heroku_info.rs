@@ -443,7 +443,7 @@ fn ram_usage() -> String {
     )
 }
 
-async fn branch() -> String {
+pub(crate) async fn branch() -> String {
     let Some(root) = crate::modules::updater::repo_root() else {
         return "Unknown".to_owned();
     };
@@ -467,7 +467,7 @@ async fn git_status() -> String {
     }
 }
 
-async fn commit_url() -> String {
+pub(crate) async fn commit_url() -> String {
     let Some(root) = crate::modules::updater::repo_root() else {
         return "Unknown".to_owned();
     };

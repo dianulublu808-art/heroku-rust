@@ -16,6 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use grammers_client::message::Button;
+use grammers_client::peer::Peer;
 use grammers_client::Client;
 use grammers_mtsender::{SenderPool, SenderPoolFatHandle};
 use grammers_session::storages::{erase, ErasedSession, SqliteSession};
@@ -48,7 +49,7 @@ impl Module for HerokuAccounts {
     fn commands(&self) -> Vec<CommandDef> {
         vec![
             CommandDef::new("addacc", "Log in an additional Telegram account")
-                .usage("<phone> | code <code> | 2fa <password> | resend | cancel")
+                .usage("<phone|user> | code <code> | 2fa <password> | resend | cancel")
                 .security(OWNER),
             CommandDef::new("switchacc", "Switch the active userbot account")
                 .usage("[account|default]")
@@ -74,6 +75,11 @@ impl Module for HerokuAccounts {
 impl HerokuAccounts {
     async fn add(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
         let Some(action) = args.get(0) else {
+            // Without arguments Python expects a reply; fall back to the
+            // accounts card when there is no reply to work with.
+            if let Some(peer) = self.reply_target(ctx, message).await {
+                return self.target_login(ctx, message, peer, false).await;
+            }
             let (html, buttons) = accounts_card(ctx);
             if ctx
                 .inline
@@ -96,8 +102,118 @@ impl HerokuAccounts {
             "resend" => self.resend(ctx, message).await,
             "code" | "sms" => self.submit_code(ctx, message, args).await,
             "2fa" | "password" => self.submit_password(ctx, message, args).await,
-            _ => self.start_login(ctx, message, action).await,
+            _ if looks_like_phone(action) => self.start_login(ctx, message, action).await,
+            _ => {
+                let force = args
+                    .list
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case("force_insecure"));
+                match self.resolve_target(ctx, action).await {
+                    Some(peer) => self.target_login(ctx, message, peer, force).await,
+                    None => {
+                        message
+                            .reply_html(ctx.tr("accounts.invalid_target"))
+                            .await?;
+                        Ok(())
+                    }
+                }
+            }
         }
+    }
+
+    /// Resolve a user from an argument, falling back to the replied message.
+    async fn resolve_target(&self, ctx: &Arc<Ctx>, raw: &str) -> Option<Peer> {
+        let peer_ref = ctx.resolve(raw).await?;
+        ctx.client.resolve_peer(peer_ref).await.ok()
+    }
+
+    async fn reply_target(&self, ctx: &Arc<Ctx>, message: &Msg) -> Option<Peer> {
+        let reply = message.get_reply().await.ok().flatten()?;
+        let peer_id = reply.inner.sender_id()?;
+        let peer_ref = ctx.resolve_peer_ref(peer_id).await?;
+        ctx.client.resolve_peer(peer_ref).await.ok()
+    }
+
+    /// Python's `.addacc <user>` confirmation flow: ask whether the account
+    /// should be added, then request its phone number in the bot PM.
+    async fn target_login(
+        &self,
+        ctx: &Arc<Ctx>,
+        message: &Msg,
+        peer: Peer,
+        force: bool,
+    ) -> Result<()> {
+        let Peer::User(user) = peer else {
+            message
+                .reply_html(ctx.tr("accounts.invalid_target"))
+                .await?;
+            return Ok(());
+        };
+        if user.is_bot() {
+            message
+                .reply_html(ctx.tr("accounts.invalid_target"))
+                .await?;
+            return Ok(());
+        }
+
+        let user_id = user.id().bot_api_dialog_id_unchecked();
+        if user_id == ctx.me_id || force {
+            return self.request_phone(ctx, message).await;
+        }
+
+        let name = escape_html(user.first_name().unwrap_or_default());
+        let id = user_id.to_string();
+        let html = ctx.tf("accounts.add_confirm", &[&name, &id]);
+        let buttons = vec![
+            vec![Button::data(
+                ctx.tr("accounts.btn_yes"),
+                format!("heroku:acc:addtarget:{user_id}").into_bytes(),
+            )],
+            vec![Button::data(
+                ctx.tr("accounts.btn_no"),
+                b"heroku:acc:list".to_vec(),
+            )],
+        ];
+
+        if ctx
+            .inline
+            .send_to_user(ctx, ctx.me_id, html, buttons)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let prefix = ctx
+            .prefixes(ctx.me_id)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ".".to_owned());
+        let html = ctx.tf(
+            "accounts.add_insecure",
+            &[&name, &id, &escape_html(&prefix), &id],
+        );
+        message.reply_html(html).await?;
+        Ok(())
+    }
+
+    /// Ask the owner for the phone number of the account to add.
+    async fn request_phone(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+        ctx.inline
+            .set_pending(ctx.me_id, PendingInput::AccountPhone);
+        let html = ctx.tr("accounts.inline_phone_prompt");
+        if ctx
+            .inline
+            .send_to_user(ctx, ctx.me_id, html, Vec::new())
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        message
+            .reply_html(ctx.tr("accounts.enter_number_format"))
+            .await?;
+        Ok(())
     }
 
     async fn start_login(&self, ctx: &Arc<Ctx>, message: &Msg, raw_phone: &str) -> Result<()> {
@@ -215,11 +331,20 @@ impl HerokuAccounts {
         };
 
         let target = raw.trim();
+        let force = args
+            .list
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("force_insecure"));
         let (html, buttons) = switch_prompt(ctx, target);
         let Some(buttons) = buttons else {
             message.reply_html(html).await?;
             return Ok(());
         };
+        if force {
+            // Python's `switchacc force_insecure` skips the confirmation card.
+            message.reply_html(switch_inline(ctx, target).await).await?;
+            return Ok(());
+        }
         if ctx
             .inline
             .send_to_user(ctx, ctx.me_id, html.clone(), buttons)
@@ -732,6 +857,16 @@ fn clear_pending(ctx: &Arc<Ctx>) {
     ] {
         ctx.db.remove(NS, key);
     }
+}
+
+/// Phone numbers start with `+` or are long digit strings; anything else is
+/// treated as a user reference, matching Python's `.addacc <user>`.
+fn looks_like_phone(value: &str) -> bool {
+    let value = value.trim();
+    if value.starts_with('+') {
+        return true;
+    }
+    value.len() >= 7 && value.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Give a newly added account the same settings as the current one, matching

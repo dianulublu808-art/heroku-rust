@@ -7,12 +7,16 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use grammers_client::message::InputMessage;
 use serde_json::{json, Value};
 
 use crate::args::Args;
 use crate::ctx::Ctx;
 use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
 use crate::tg::{escape_html, Msg};
+
+const HEROKU_PHOTO: &str =
+    "https://raw.githubusercontent.com/Heroku-userbot/assets/refs/heads/main/heroku_cmd.jpg";
 
 pub struct CoreMod;
 
@@ -107,27 +111,44 @@ impl Module for CoreMod {
 
 impl CoreMod {
     async fn heroku(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
-        message
-            .reply_html(format!(
-                "<tg-emoji emoji-id=4974681956907221809>🪐</tg-emoji> <b>Heroku {}</b>\n\
-                 <i>{}</i>\n\n\
-                 ▫️ {}: <b>{}</b>\n\
-                 ▫️ {}: <b>{}</b>\n\
-                 ▫️ {}: <b>{}</b>\n\
-                 ▫️ {}: <b>{}</b>",
-                crate::config::VERSION,
-                ctx.tr("settings.heroku_subtitle"),
-                ctx.tr("info.uptime"),
-                ctx.uptime(),
-                ctx.tr("info.modules"),
-                ctx.modules.all().len(),
-                ctx.tr("info.user"),
-                escape_html(&ctx.me_name),
-                ctx.tr("info.owner"),
-                ctx.me_id,
-            ))
-            .await?;
-        Ok(())
+        let parts: Vec<&str> = crate::config::VERSION.split('.').collect();
+        let major = parts.first().copied().unwrap_or("0").to_owned();
+        let minor = parts.get(1).copied().unwrap_or("0").to_owned();
+        let patch = parts.get(2).copied().unwrap_or("0").to_owned();
+        let build = crate::modules::heroku_info::commit_url().await;
+        let htl = format!("grammers 0.12.0 #{}", grammers_tl_types::LAYER);
+
+        let mut html = ctx.tf(
+            "settings.heroku",
+            &[
+                "🪐 <b>Heroku userbot</b>",
+                &major,
+                &minor,
+                &patch,
+                &build,
+                &htl,
+            ],
+        );
+
+        let branch = crate::modules::heroku_info::branch().await;
+        match branch.as_str() {
+            "" | "main" | "master" | "Unknown" => {}
+            "beta" => html.push_str(&ctx.tf("settings.happy_beta", &[&branch])),
+            other => html.push_str(&ctx.tf("settings.unstable", &[other])),
+        }
+
+        crate::protection::guard().await;
+        let input = InputMessage::new()
+            .html(html.clone())
+            .photo_url(HEROKU_PHOTO.to_owned());
+        match message.inner.reply(input).await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                tracing::warn!("Failed to send the Heroku banner: {err}");
+                message.reply_html(html).await?;
+                Ok(())
+            }
+        }
     }
 
     fn blacklist_entry(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> String {

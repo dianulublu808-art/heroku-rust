@@ -40,6 +40,11 @@ const TOGGLES: &[(&str, &str, bool)] = &[
         "Suggest subscribing to module author channels",
         true,
     ),
+    (
+        "do_not_suggest_subscribe",
+        "Never suggest subscribing to module author channels",
+        false,
+    ),
 ];
 
 #[async_trait]

@@ -10,7 +10,7 @@ mod eval;
 mod help;
 pub(crate) mod heroku_backup;
 mod heroku_config;
-mod heroku_info;
+pub(crate) mod heroku_info;
 pub(crate) mod heroku_security;
 pub(crate) mod heroku_settings;
 mod inline;

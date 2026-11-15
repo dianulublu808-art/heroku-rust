@@ -1270,22 +1270,10 @@ impl InlineManager {
         let caption = if profile {
             self.profile_text(ctx, username.as_deref())
         } else {
-            let commands: usize = ctx
-                .modules
-                .all()
-                .iter()
-                .map(|module| module.commands().len())
-                .sum();
-            ctx.tn(
-                "inline.start_caption",
-                &[
-                    ("name", &escape_html(&ctx.me_name)),
-                    ("username", &escape_html(username.as_deref().unwrap_or(""))),
-                    ("prefix", &escape_html(&prefix(ctx))),
-                    ("commands", &commands.to_string()),
-                    ("uptime", &ctx.uptime()),
-                ],
-            )
+            // Python's `bot_watcher` uses `this_is_heroku` here; premium custom
+            // emoji are unavailable to the Rust client, so use the plain
+            // fallback it prints for non-premium accounts.
+            ctx.tf("inline.this_is_heroku", &["🪐", "Heroku"])
         };
 
         let markup = if profile {
@@ -2060,6 +2048,7 @@ impl InlineManager {
                 || data == "heroku:acc:add"
                 || data == "heroku:acc:default"
                 || data == "heroku:acc:resend"
+                || data.starts_with("heroku:acc:addtarget:")
                 || data.starts_with("heroku:acc:sw:")
                 || data.starts_with("heroku:acc:swc:") =>
             {
@@ -2072,7 +2061,7 @@ impl InlineManager {
                     return Ok(());
                 }
 
-                if data == "heroku:acc:add" {
+                if data == "heroku:acc:add" || data.starts_with("heroku:acc:addtarget:") {
                     self.set_pending(sender, PendingInput::AccountPhone);
                     let _ = call
                         .answer()
