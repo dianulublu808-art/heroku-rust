@@ -30,10 +30,18 @@ fn dialog_id(peer: PeerId) -> i64 {
     }
 }
 
+/// `| grep` / `| grep -v` output filter attached to a command message.
+#[derive(Clone, Debug, Default)]
+pub struct GrepFilter {
+    pub include: Option<String>,
+    pub exclude: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Msg {
     pub inner: Message,
     text_override: Option<String>,
+    grep: Option<GrepFilter>,
 }
 
 impl Msg {
@@ -41,12 +49,68 @@ impl Msg {
         Self {
             inner,
             text_override: None,
+            grep: None,
         }
     }
 
     /// Replace the text returned by [`Msg::text`] (used by aliases and grep).
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text_override = Some(text.into());
+    }
+
+    /// Attach a `| grep` filter to every text reply/edit produced by the
+    /// command handler.
+    pub fn set_grep(&mut self, filter: GrepFilter) {
+        self.grep = Some(filter);
+    }
+
+    fn apply_grep(&self, html: &str) -> String {
+        match &self.grep {
+            Some(filter) => Self::grep_filter_text(html, filter),
+            None => html.to_owned(),
+        }
+    }
+
+    fn grep_filter_text(html: &str, filter: &GrepFilter) -> String {
+        let mut matched = Vec::new();
+        for line in html.split('\n') {
+            let plain = strip_html(line);
+            let included = filter
+                .include
+                .as_ref()
+                .map(|pattern| plain.contains(pattern))
+                .unwrap_or(true);
+            let excluded = filter
+                .exclude
+                .as_ref()
+                .is_some_and(|pattern| plain.contains(pattern));
+            if included && !excluded {
+                let mut escaped = escape_html(&plain);
+                if let Some(pattern) = &filter.include {
+                    let escaped_pattern = escape_html(pattern);
+                    escaped =
+                        escaped.replace(&escaped_pattern, &format!("<u>{escaped_pattern}</u>"));
+                }
+                matched.push(escaped);
+            }
+        }
+
+        let mut condition = String::new();
+        if let Some(pattern) = &filter.include {
+            condition.push_str(&format!("contain <b>{}</b>", escape_html(pattern)));
+        }
+        if let Some(pattern) = &filter.exclude {
+            if filter.include.is_some() {
+                condition.push_str(" and ");
+            }
+            condition.push_str(&format!("do not contain <b>{}</b>", escape_html(pattern)));
+        }
+
+        if matched.is_empty() {
+            format!("💬 <i>No lines that {condition}</i>")
+        } else {
+            format!("<i>💬 Lines that {condition}:</i>\n{}", matched.join("\n"))
+        }
     }
 
     pub fn id(&self) -> i32 {
@@ -86,6 +150,12 @@ impl Msg {
 
     pub fn is_channel(&self) -> bool {
         self.inner.peer_id().kind() == PeerKind::Channel
+    }
+
+    /// Broadcast channel (not a megagroup). Used to ignore edits, matching the
+    /// Python dispatcher.
+    pub fn is_broadcast_channel(&self) -> bool {
+        matches!(self.peer(), Some(Peer::Channel(_)))
     }
 
     pub fn reply_to_id(&self) -> Option<i32> {
@@ -131,13 +201,13 @@ impl Msg {
 
     pub async fn reply_html(&self, html: impl Into<String>) -> Result<Msg> {
         crate::protection::guard().await;
-        let message = InputMessage::new().html(html.into());
+        let message = InputMessage::new().html(self.apply_grep(&html.into()));
         Ok(Msg::new(self.inner.reply(message).await?))
     }
 
     pub async fn respond_html(&self, html: impl Into<String>) -> Result<Msg> {
         crate::protection::guard().await;
-        let message = InputMessage::new().html(html.into());
+        let message = InputMessage::new().html(self.apply_grep(&html.into()));
         Ok(Msg::new(self.inner.respond(message).await?))
     }
 
@@ -159,7 +229,7 @@ impl Msg {
     pub async fn edit_html(&self, html: impl Into<String>) -> Result<()> {
         crate::protection::guard().await;
         self.inner
-            .edit(InputMessage::new().html(html.into()))
+            .edit(InputMessage::new().html(self.apply_grep(&html.into())))
             .await?;
         Ok(())
     }
@@ -231,6 +301,31 @@ pub fn escape_html(text: &str) -> String {
     out
 }
 
+/// Minimal HTML unescape used by the `| grep` line filter.
+pub fn unescape_html(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Strip Telegram HTML tags and decode entities so `| grep` matches the text
+/// the user actually sees.
+pub fn strip_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    unescape_html(&out)
+}
+
 pub fn truncate(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_owned();
@@ -267,4 +362,33 @@ pub fn chunks(text: &str, limit: usize) -> Vec<String> {
         result.push(current);
     }
     result
+}
+
+#[cfg(test)]
+mod grep_tests {
+    use super::{GrepFilter, Msg};
+
+    #[test]
+    fn filters_and_underlines_matches() {
+        let filter = GrepFilter {
+            include: Some("needle".to_owned()),
+            exclude: None,
+        };
+        let out = Msg::grep_filter_text("<b>hay</b>\nneedle here\nbye", &filter);
+        assert!(out.contains("<u>needle</u> here"));
+        assert!(!out.contains("hay"));
+        assert!(!out.contains("bye"));
+    }
+
+    #[test]
+    fn exclude_only_keeps_other_lines() {
+        let filter = GrepFilter {
+            include: None,
+            exclude: Some("owner".to_owned()),
+        };
+        let out = Msg::grep_filter_text("mask for owner\nmask for admin", &filter);
+        assert!(!out.contains("mask for owner"));
+        assert!(out.contains("mask for admin"));
+        assert!(out.contains("do not contain <b>owner</b>"));
+    }
 }

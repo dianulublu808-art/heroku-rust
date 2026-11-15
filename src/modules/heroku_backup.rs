@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use grammers_client::message::Button;
 use serde_json::Value;
 
 use crate::args::Args;
@@ -41,7 +42,7 @@ impl Module for HerokuBackupMod {
                 "restoremods",
                 "Restore downloaded modules from a replied archive",
             ),
-            CommandDef::new("set_backup_period", "Set automatic backup period").usage("<seconds>"),
+            CommandDef::new("set_backup_period", "Set automatic backup period").usage("<hours>"),
         ]
     }
 
@@ -60,7 +61,7 @@ impl Module for HerokuBackupMod {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
             loop {
                 ticker.tick().await;
-                let period = ctx.db.get_i64("HerokuBackupMod", "backup_period", 0);
+                let period = backup_period(&ctx);
                 if period <= 0 {
                     continue;
                 }
@@ -134,15 +135,30 @@ impl Module for HerokuBackupMod {
             "backupmods" => self.backup_modules(ctx, message).await?,
             "restoremods" => self.restore_modules(ctx, message).await?,
             "set_backup_period" => {
-                let seconds = args.get(0).and_then(|raw| raw.parse::<i64>().ok());
-                let Some(seconds) = seconds else {
-                    message.reply_html(ctx.tr("common.no_args")).await?;
+                let Some(raw) = args.get(0) else {
+                    let user_id = message.sender_id().unwrap_or(ctx.me_id);
+                    let (html, buttons) = period_card(ctx);
+                    if ctx
+                        .inline
+                        .send_to_user(ctx, user_id, html, buttons)
+                        .await
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                    message.reply_html(ctx.tr("backup.period_invalid")).await?;
                     return Ok(());
                 };
-                ctx.db.set("HerokuBackupMod", "backup_period", seconds);
-                message
-                    .reply_html(ctx.tf("backup.period_set", &[&seconds.to_string()]))
-                    .await?;
+                let Ok(hours) = raw.trim().parse::<i64>() else {
+                    message.reply_html(ctx.tr("backup.period_invalid")).await?;
+                    return Ok(());
+                };
+                if !(0..200).contains(&hours) {
+                    message.reply_html(ctx.tr("backup.period_invalid")).await?;
+                    return Ok(());
+                }
+                let text = apply_period(ctx, hours);
+                message.reply_html(text).await?;
             }
             _ => {
                 message.reply_html(ctx.tr("common.not_found")).await?;
@@ -690,6 +706,70 @@ fn create_backup(ctx: &Arc<Ctx>) -> Result<PathBuf> {
     let raw = ctx.db.dump_pretty();
     crate::config::write_private(&path, raw.as_bytes())?;
     Ok(path)
+}
+
+/// Automatic backup period in seconds. Reads both the Python-compatible
+/// `period` key and the older Rust `backup_period` key.
+fn backup_period(ctx: &Ctx) -> i64 {
+    let period = ctx.db.get_i64("HerokuBackupMod", "period", 0);
+    if period != 0 {
+        return period;
+    }
+    ctx.db.get_i64("HerokuBackupMod", "backup_period", 0)
+}
+
+fn apply_period(ctx: &Ctx, hours: i64) -> String {
+    let seconds = hours * 3600;
+    ctx.db
+        .set("HerokuBackupMod", "period", Value::from(seconds));
+    ctx.db
+        .set("HerokuBackupMod", "backup_period", Value::from(seconds));
+    ctx.db.set(
+        "HerokuBackupMod",
+        "last_backup",
+        Value::from(chrono::Utc::now().timestamp()),
+    );
+    if hours == 0 {
+        ctx.tr("backup.period_never")
+    } else {
+        ctx.tf("backup.period_set", &[&hours.to_string()])
+    }
+}
+
+pub(crate) fn period_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let seconds = backup_period(ctx);
+    let current = if seconds > 0 {
+        ctx.tf("backup.period_hours", &[&(seconds / 3600).to_string()])
+    } else {
+        ctx.tr("backup.period_never")
+    };
+    let html = ctx.tf("backup.period_title", &[&current]);
+
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    for hours in [1_i64, 2, 4, 6, 8, 12, 24, 48, 168] {
+        row.push(Button::data(
+            format!("🕰 {hours} h"),
+            format!("heroku:backup:period:{hours}").into_bytes(),
+        ));
+        if row.len() == 3 {
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows.push(vec![Button::data(
+        ctx.tr("backup.btn_never"),
+        b"heroku:backup:period:0".to_vec(),
+    )]);
+    rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+    (html, rows)
+}
+
+pub(crate) fn set_period_from_inline(ctx: &Arc<Ctx>, hours: i64) -> (String, Vec<Vec<Button>>) {
+    apply_period(ctx, hours);
+    period_card(ctx)
 }
 
 inventory::submit! {

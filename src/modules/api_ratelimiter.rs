@@ -13,6 +13,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use grammers_client::message::Button;
+
 use crate::args::Args;
 use crate::ctx::Ctx;
 use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
@@ -148,29 +150,65 @@ impl APIRatelimiterMod {
             return Ok(());
         }
 
-        let suspended = state
-            .suspended_for()
-            .map(|seconds| format!("{seconds}s"))
-            .unwrap_or_else(|| "—".to_owned());
-        let frozen = state
-            .frozen_for()
-            .map(|seconds| format!("{seconds}s"))
-            .unwrap_or_else(|| "—".to_owned());
-
-        let text = ctx.tn(
-            "api_protection.status",
-            &[
-                ("enabled", if state.enabled() { "✅" } else { "❌" }),
-                ("threshold", &state.threshold().to_string()),
-                ("sample", &state.sample_secs().to_string()),
-                ("freeze", &state.freeze_secs().to_string()),
-                ("frozen", &escape_html(&frozen)),
-                ("suspended", &escape_html(&suspended)),
-            ],
-        );
-        message.reply_html(text).await?;
+        let user_id = message.sender_id().unwrap_or(ctx.me_id);
+        let (html, buttons) = protection_card(ctx);
+        if ctx
+            .inline
+            .send_to_user(ctx, user_id, html, buttons)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        message.reply_html(protection_text(ctx)).await?;
         Ok(())
     }
+}
+
+pub(crate) fn protection_text(ctx: &Arc<Ctx>) -> String {
+    let state = protection();
+    let suspended = state
+        .suspended_for()
+        .map(|seconds| format!("{seconds}s"))
+        .unwrap_or_else(|| "—".to_owned());
+    let frozen = state
+        .frozen_for()
+        .map(|seconds| format!("{seconds}s"))
+        .unwrap_or_else(|| "—".to_owned());
+    ctx.tn(
+        "api_protection.status",
+        &[
+            ("enabled", if state.enabled() { "✅" } else { "❌" }),
+            ("threshold", &state.threshold().to_string()),
+            ("sample", &state.sample_secs().to_string()),
+            ("freeze", &state.freeze_secs().to_string()),
+            ("frozen", &escape_html(&frozen)),
+            ("suspended", &escape_html(&suspended)),
+        ],
+    )
+}
+
+pub(crate) fn protection_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let enabled = protection().enabled();
+    let buttons = vec![
+        vec![Button::data(
+            ctx.tr(if enabled {
+                "api_protection.btn_disable"
+            } else {
+                "api_protection.btn_enable"
+            }),
+            b"heroku:api:toggle".to_vec(),
+        )],
+        vec![Button::data("✖️ Close", b"heroku:close".to_vec())],
+    ];
+    (protection_text(ctx), buttons)
+}
+
+pub(crate) fn toggle_protection(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let enabled = !protection().enabled();
+    ctx.db.set(NS, "enabled", enabled);
+    protection().set_enabled(enabled);
+    protection_card(ctx)
 }
 
 inventory::submit! {

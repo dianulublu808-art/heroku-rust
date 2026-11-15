@@ -460,7 +460,7 @@ async fn build_release(root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn git(root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
     let output = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::process::Command::new("git")
@@ -482,7 +482,7 @@ async fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn repo_root() -> Option<PathBuf> {
+pub(crate) fn repo_root() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("HEROKU_REPO") {
         let path = PathBuf::from(root);
         if path.join(".git").exists() {

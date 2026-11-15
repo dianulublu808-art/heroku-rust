@@ -200,6 +200,12 @@ pub trait Module: Send + Sync {
         true
     }
 
+    /// Whether the module implements [`Module::on_message`]. Used by
+    /// `.watchers` / `.watcher`, since Rust has no runtime reflection.
+    fn has_watcher(&self) -> bool {
+        false
+    }
+
     async fn on_load(&self, _ctx: &Arc<Ctx>) -> Result<()> {
         Ok(())
     }

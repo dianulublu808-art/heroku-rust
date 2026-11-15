@@ -139,6 +139,10 @@ async fn async_main() -> Result<()> {
 
     let lang = db.get_str("heroku.translations", "lang", &config.lang);
     let translator = Translator::new(lang);
+    let external_langs = db.get_string_list("heroku.translations", "external");
+    if !external_langs.is_empty() {
+        crate::modules::translations::load_external_packs(&translator, &external_langs).await;
+    }
 
     let modules = Modules::discover();
     info!("Discovered {} modules", modules.all().len());
@@ -232,6 +236,14 @@ async fn async_main() -> Result<()> {
                         let message = Msg::new(message.into_inner());
                         tasks.spawn(async move {
                             dispatcher.handle(&ctx, message).await;
+                        });
+                    }
+                    Ok(Update::MessageEdited(message)) => {
+                        let ctx = ctx.clone();
+                        let dispatcher = dispatcher.clone();
+                        let message = Msg::new(message.into_inner());
+                        tasks.spawn(async move {
+                            dispatcher.handle_edit(&ctx, message).await;
                         });
                     }
                     Ok(_) => {}

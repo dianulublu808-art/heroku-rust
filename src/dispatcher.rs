@@ -5,6 +5,7 @@
 //! and watcher/command execution.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -13,9 +14,10 @@ use serde_json::Value;
 use crate::args::Args;
 use crate::ctx::Ctx;
 use crate::module::{CommandDef, Module, OWNER};
-use crate::tg::{escape_html, Msg};
+use crate::tg::{escape_html, GrepFilter, Msg};
 
 const RATELIMIT_NS: &str = "heroku.dispatcher";
+const MESSAGE_STATES_LIMIT: usize = 1000;
 
 pub struct Dispatcher {
     ratelimit_user: Mutex<HashMap<i64, Counter>>,
@@ -24,6 +26,10 @@ pub struct Dispatcher {
     max_chat: i64,
     me_username: Option<String>,
     me_id: i64,
+    /// Last processed text hash per `(chat_id, message_id)`. Telegram delivers
+    /// reaction changes as message edits with identical text; this lets us
+    /// ignore them without running the command again.
+    message_states: Mutex<HashMap<(i64, i32), u64>>,
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +56,7 @@ impl Dispatcher {
             max_chat,
             me_username: ctx.me_username.clone(),
             me_id: ctx.me_id,
+            message_states: Mutex::new(HashMap::new()),
         }
     }
 
@@ -64,6 +71,7 @@ impl Dispatcher {
             return;
         }
 
+        self.remember_state(ctx, &message);
         self.run_watchers(ctx, &message).await;
 
         if let Some(prepared) = self.prepare(ctx, message).await {
@@ -75,6 +83,89 @@ impl Dispatcher {
             }
             self.execute(ctx, prepared).await;
         }
+    }
+
+    /// Entry point for `Update::MessageEdited`. Mirrors the Python dispatcher:
+    /// edits are treated as commands (watchers are not re-run), broadcast
+    /// channel edits are ignored and reaction-only edits are filtered out.
+    pub async fn handle_edit(&self, ctx: &Arc<Ctx>, message: Msg) {
+        if message.text().trim().is_empty() {
+            return;
+        }
+
+        if self.is_reaction_edit(ctx, &message) {
+            tracing::debug!(
+                "Ignoring reaction edit in {}#{}",
+                message.chat_id(),
+                message.id()
+            );
+            return;
+        }
+
+        if message.is_broadcast_channel() {
+            tracing::debug!("Ignoring edit in broadcast channel {}", message.chat_id());
+            return;
+        }
+
+        if self.chat_blocked(ctx, &message) {
+            tracing::debug!(
+                "Edited message is blocklisted in chat {}",
+                message.chat_id()
+            );
+            return;
+        }
+
+        self.remember_state(ctx, &message);
+
+        if let Some(prepared) = self.prepare(ctx, message).await {
+            if !self
+                .ratelimit_ok(ctx, &prepared.message, prepared.command.ratelimit)
+                .await
+            {
+                return;
+            }
+            self.execute(ctx, prepared).await;
+        }
+    }
+
+    fn keep_message_state(&self, ctx: &Ctx) -> bool {
+        ctx.db.get_bool("heroku.main", "keep_message_state", true)
+    }
+
+    fn state_hash(message: &Msg) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        message.text().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn remember_state(&self, ctx: &Ctx, message: &Msg) {
+        if !self.keep_message_state(ctx) {
+            if let Ok(mut states) = self.message_states.lock() {
+                states.clear();
+            }
+            return;
+        }
+        if let Ok(mut states) = self.message_states.lock() {
+            states.insert((message.chat_id(), message.id()), Self::state_hash(message));
+            while states.len() > MESSAGE_STATES_LIMIT {
+                let Some(key) = states.keys().next().copied() else {
+                    break;
+                };
+                states.remove(&key);
+            }
+        }
+    }
+
+    fn is_reaction_edit(&self, ctx: &Ctx, message: &Msg) -> bool {
+        if !self.keep_message_state(ctx) {
+            return false;
+        }
+        let Ok(states) = self.message_states.lock() else {
+            return false;
+        };
+        states
+            .get(&(message.chat_id(), message.id()))
+            .is_some_and(|hash| *hash == Self::state_hash(message))
     }
 
     fn chat_blocked(&self, ctx: &Ctx, message: &Msg) -> bool {
@@ -296,16 +387,29 @@ impl Dispatcher {
             return None;
         }
 
+        // `| grep` / `| grep -v` output filtering. Terminal output is never
+        // filtered, matching the behaviour of the Python dispatcher.
+        let grep_enabled = ctx.db.get_bool("heroku.main", "grep", false)
+            && !candidates
+                .iter()
+                .any(|(module, _)| module.name() == "TerminalMod");
+        let mut after_token_owned = after_token.trim().to_owned();
+        let grep_filter = if grep_enabled {
+            extract_grep(&mut after_token_owned)
+        } else {
+            None
+        };
+
         let mut command_text = command_name.clone();
         if !alias_args.is_empty() {
             command_text.push(' ');
             command_text.push_str(&alias_args);
         }
-        if !after_token.trim().is_empty() {
+        if !after_token_owned.is_empty() {
             if !alias_args.is_empty() {
                 command_text.push(' ');
             }
-            command_text.push_str(after_token.trim());
+            command_text.push_str(&after_token_owned);
         }
 
         // Rewrite the message text to the canonical form (handlers that read
@@ -313,13 +417,16 @@ impl Dispatcher {
         let rewritten = format!("{prefix}{command_text}");
         let mut message = message;
         message.set_text(rewritten);
+        if let Some(filter) = grep_filter {
+            message.set_grep(filter);
+        }
 
         let args = Args::parse(if alias_args.is_empty() {
-            after_token.trim().to_owned()
-        } else if after_token.trim().is_empty() {
+            after_token_owned
+        } else if after_token_owned.is_empty() {
             alias_args.clone()
         } else {
-            format!("{alias_args} {}", after_token.trim())
+            format!("{alias_args} {after_token_owned}")
         });
 
         candidates.retain(|(module, command)| {
@@ -472,6 +579,52 @@ impl Dispatcher {
     }
 }
 
+/// Parse and strip a trailing `| grep pattern` / `| grep -v pattern` clause.
+/// Returns `None` when no filter is present; `||grep` escapes filtering and is
+/// rewritten to a literal `| grep`.
+fn extract_grep(text: &mut String) -> Option<GrepFilter> {
+    if text.contains("||grep") || text.contains("|| grep") {
+        *text = text
+            .replace("||grep", "| grep")
+            .replace("|| grep", "| grep");
+        return None;
+    }
+
+    let mut marker = None;
+    for needle in ["| grep ", "|grep "] {
+        if let Some(index) = text.rfind(needle) {
+            if marker.is_none_or(|current| index > current) {
+                marker = Some(index);
+            }
+        }
+    }
+    let index = marker?;
+
+    let rest = text[index..]
+        .trim_start_matches('|')
+        .trim_start()
+        .trim_start_matches("grep")
+        .trim()
+        .to_owned();
+    if rest.is_empty() {
+        return None;
+    }
+    text.truncate(index);
+    *text = text.trim_end().to_owned();
+
+    let mut include = Some(rest.clone());
+    let mut exclude = None;
+    if let Some(pattern) = rest.strip_prefix("-v ") {
+        include = None;
+        exclude = Some(pattern.trim().to_owned());
+    } else if let Some((before, after)) = rest.split_once(" -v ") {
+        include = Some(before.trim().to_owned());
+        exclude = Some(after.trim().to_owned());
+    }
+
+    Some(GrepFilter { include, exclude })
+}
+
 fn split_first_word(text: &str) -> (String, &str) {
     let text = text.trim_start();
     match text.find(char::is_whitespace) {
@@ -511,4 +664,43 @@ pub fn censor(text: &str) -> String {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod grep_tests {
+    use super::extract_grep;
+
+    #[test]
+    fn parses_include_filter() {
+        let mut text = ".help | grep security".to_owned();
+        let filter = extract_grep(&mut text).expect("filter");
+        assert_eq!(text, ".help");
+        assert_eq!(filter.include.as_deref(), Some("security"));
+        assert!(filter.exclude.is_none());
+    }
+
+    #[test]
+    fn parses_include_and_exclude() {
+        let mut text = ".help |grep mask -v owner".to_owned();
+        let filter = extract_grep(&mut text).expect("filter");
+        assert_eq!(text, ".help");
+        assert_eq!(filter.include.as_deref(), Some("mask"));
+        assert_eq!(filter.exclude.as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn parses_exclude_only() {
+        let mut text = ".help | grep -v owner".to_owned();
+        let filter = extract_grep(&mut text).expect("filter");
+        assert_eq!(text, ".help");
+        assert!(filter.include.is_none());
+        assert_eq!(filter.exclude.as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn double_pipe_escapes_filter() {
+        let mut text = ".help ||grep foo".to_owned();
+        assert!(extract_grep(&mut text).is_none());
+        assert_eq!(text, ".help | grep foo");
+    }
 }

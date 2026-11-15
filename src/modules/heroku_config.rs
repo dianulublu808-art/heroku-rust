@@ -30,7 +30,6 @@ impl Module for HerokuConfigMod {
         vec![
             CommandDef::new("config", "Show or change module configuration")
                 .aliases(&["cfg", "fcfg"])
-                .aliases(&["cfg"])
                 .usage("[module] [key] [value]"),
         ]
     }

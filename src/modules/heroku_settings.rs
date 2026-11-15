@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use grammers_client::message::Button;
 use serde_json::Value;
 
 use crate::args::Args;
@@ -16,16 +17,27 @@ use crate::tg::{escape_html, Msg};
 
 pub struct HerokuSettingsMod;
 
-const TOGGLES: &[(&str, &str)] = &[
+const TOGGLES: &[(&str, &str, bool)] = &[
     (
         "no_nickname",
         "Do not require the userbot username in groups",
+        false,
     ),
-    ("grep", "Enable | grep filtering for command output"),
-    ("inlinelogs", "Show exception details in command errors"),
+    ("grep", "Enable | grep filtering for command output", false),
+    (
+        "inlinelogs",
+        "Show exception details in command errors",
+        true,
+    ),
     (
         "keep_message_state",
         "Keep message state for reaction handling",
+        true,
+    ),
+    (
+        "suggest_subscribe",
+        "Suggest subscribing to module author channels",
+        true,
     ),
 ];
 
@@ -134,8 +146,21 @@ impl Module for HerokuSettingsMod {
 
 impl HerokuSettingsMod {
     async fn settings(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
+        if args.get(0).is_none() {
+            let (html, buttons) = settings_card(ctx);
+            let user_id = message.sender_id().unwrap_or(ctx.me_id);
+            if ctx
+                .inline
+                .send_to_user(ctx, user_id, html, buttons)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
         if let Some(key) = args.get(0) {
-            if !TOGGLES.iter().any(|(name, _)| *name == key) {
+            if !TOGGLES.iter().any(|(name, _, _)| *name == key) {
                 message.reply_html(ctx.tr("config.not_found")).await?;
                 return Ok(());
             }
@@ -149,8 +174,8 @@ impl HerokuSettingsMod {
         }
 
         let mut lines = vec![ctx.tr("settings.title")];
-        for (key, description) in TOGGLES {
-            let enabled = ctx.db.get_bool("heroku.main", key, false);
+        for (key, description, default) in TOGGLES {
+            let enabled = ctx.db.get_bool("heroku.main", key, *default);
             lines.push(format!(
                 "{} <code>{}</code> — <i>{}</i>",
                 if enabled { "✅" } else { "🚫" },
@@ -167,9 +192,12 @@ impl HerokuSettingsMod {
     async fn watchers(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
         let mut lines = vec!["👁 <b>Watchers</b>".to_owned()];
         let disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
-        for module in ctx.modules.all() {
-            // A watcher exists when the module overrides `on_message`; there is
-            // no reflection in Rust, so show the disabled state for all modules.
+        for module in ctx
+            .modules
+            .all()
+            .iter()
+            .filter(|module| module.has_watcher())
+        {
             let state = if disabled.contains_key(module.name()) {
                 "🚫"
             } else {
@@ -195,6 +223,12 @@ impl HerokuSettingsMod {
                 .await?;
             return Ok(());
         };
+        if !module.has_watcher() {
+            message
+                .reply_html(ctx.tr("settings.module_not_found"))
+                .await?;
+            return Ok(());
+        }
         let mut disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
         let enabled = if disabled.remove(module.name()).is_some() {
             true
@@ -331,6 +365,50 @@ impl HerokuSettingsMod {
             .await?;
         Ok(())
     }
+}
+
+pub(crate) fn settings_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let mut lines = vec![ctx.tr("settings.title")];
+    for (key, description, default) in TOGGLES {
+        let enabled = ctx.db.get_bool("heroku.main", key, *default);
+        lines.push(format!(
+            "{} <code>{}</code> — <i>{}</i>",
+            if enabled { "✅" } else { "🚫" },
+            key,
+            description
+        ));
+    }
+    lines.push(String::new());
+    lines.push(ctx.tr("settings.inline_hint"));
+
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    for (key, _, default) in TOGGLES {
+        let enabled = ctx.db.get_bool("heroku.main", key, *default);
+        row.push(Button::data(
+            format!("{} {key}", if enabled { "✅" } else { "🚫" }),
+            format!("heroku:set:{key}").into_bytes(),
+        ));
+        if row.len() == 2 {
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows.push(vec![
+        Button::data("🔄 Restart", b"heroku:upd:restart".to_vec()),
+        Button::data("🪂 Update", b"heroku:upd:apply".to_vec()),
+    ]);
+    rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+    (lines.join("\n"), rows)
+}
+
+pub(crate) fn toggle_setting(ctx: &Arc<Ctx>, key: &str) -> Option<(String, Vec<Vec<Button>>)> {
+    let (_, _, default) = TOGGLES.iter().find(|(name, _, _)| *name == key)?;
+    let current = ctx.db.get_bool("heroku.main", key, *default);
+    ctx.db.set("heroku.main", key, !current);
+    Some(settings_card(ctx))
 }
 
 inventory::submit! {

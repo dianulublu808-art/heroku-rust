@@ -540,9 +540,284 @@ pub(crate) fn security_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
             Button::data(ctx.tr("security.btn_owners"), b"heroku:sec:o".to_vec()),
             Button::data(ctx.tr("security.btn_groups"), b"heroku:sec:g".to_vec()),
         ],
+        vec![Button::data(
+            ctx.tr("security.btn_permissions"),
+            b"heroku:sec:p".to_vec(),
+        )],
         vec![Button::data("✖️ Close", b"heroku:close".to_vec())],
     ];
     (lines.join("\n"), buttons)
+}
+
+pub(crate) fn permissions_card(ctx: &Arc<Ctx>, page: usize) -> (String, Vec<Vec<Button>>) {
+    let mut commands = ctx
+        .modules
+        .all()
+        .iter()
+        .flat_map(|module| {
+            module
+                .commands()
+                .into_iter()
+                .map(move |command| (module.name().to_owned(), command))
+        })
+        .collect::<Vec<_>>();
+    commands.sort_by(|left, right| {
+        left.0
+            .to_lowercase()
+            .cmp(&right.0.to_lowercase())
+            .then_with(|| left.1.name.cmp(right.1.name))
+    });
+
+    let per_page = 8usize;
+    let pages = commands.len().div_ceil(per_page).max(1);
+    let page = page.min(pages - 1);
+    let start = page * per_page;
+    let end = (start + per_page).min(commands.len());
+
+    let mut lines = vec![ctx.tr("security.permissions_title")];
+    lines.push(format!(
+        "▫️ {}: <code>{}</code> ({})",
+        ctx.tr("security.mask_default"),
+        ctx.security.default_mask(),
+        mask_to_names(ctx.security.default_mask()).join(", ")
+    ));
+    lines.push(format!(
+        "▫️ {}: <code>{}</code> ({})",
+        ctx.tr("security.mask_bounding"),
+        ctx.security.bounding_mask(),
+        mask_to_names(ctx.security.bounding_mask()).join(", ")
+    ));
+    lines.push(String::new());
+    lines.push(ctx.tf(
+        "security.permissions_page",
+        &[&(page + 1).to_string(), &pages.to_string()],
+    ));
+    lines.push(ctx.tr("security.permissions_hint"));
+
+    let mut rows = Vec::new();
+    for (module, command) in &commands[start..end] {
+        let mask = ctx
+            .security
+            .command_mask(module, command.name, command.security);
+        rows.push(vec![Button::data(
+            format!("🛡 {module}.{} · {mask}", command.name),
+            format!("heroku:sec:pm:{module}:{}", command.name).into_bytes(),
+        )]);
+    }
+
+    if pages > 1 {
+        let mut navigation = Vec::new();
+        if page > 0 {
+            navigation.push(Button::data(
+                "⬅️",
+                format!("heroku:sec:p:{}", page - 1).into_bytes(),
+            ));
+        }
+        navigation.push(Button::data(
+            format!("{}/{}", page + 1, pages),
+            b"heroku:sec:p".to_vec(),
+        ));
+        if page + 1 < pages {
+            navigation.push(Button::data(
+                "➡️",
+                format!("heroku:sec:p:{}", page + 1).into_bytes(),
+            ));
+        }
+        rows.push(navigation);
+    }
+
+    rows.push(vec![
+        Button::data(
+            ctx.tr("security.btn_default_mask"),
+            b"heroku:sec:pdef".to_vec(),
+        ),
+        Button::data(
+            ctx.tr("security.btn_bounding_mask"),
+            b"heroku:sec:pbnd".to_vec(),
+        ),
+    ]);
+    rows.push(vec![
+        Button::data(ctx.tr("security.btn_back"), b"heroku:sec".to_vec()),
+        Button::data("✖️ Close", b"heroku:close".to_vec()),
+    ]);
+    (lines.join("\n"), rows)
+}
+
+pub(crate) fn command_mask_card(
+    ctx: &Arc<Ctx>,
+    module_name: &str,
+    command_name: &str,
+) -> Option<(String, Vec<Vec<Button>>)> {
+    let module = ctx.modules.get(module_name)?;
+    let command = module
+        .commands()
+        .into_iter()
+        .find(|command| command.name.eq_ignore_ascii_case(command_name))?;
+    let mask = ctx
+        .security
+        .command_mask(module.name(), command.name, command.security);
+
+    let mut lines = vec![ctx.tf(
+        "security.command_mask_title",
+        &[&escape_html(module.name()), &escape_html(command.name)],
+    )];
+    lines.push(format!(
+        "▫️ {}: <code>{mask}</code>",
+        ctx.tr("security.current_mask")
+    ));
+    lines.push(format!(
+        "▫️ {}: {}",
+        ctx.tr("security.allowed_for"),
+        mask_to_names(mask)
+            .iter()
+            .map(|name| format!("<code>{name}</code>"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    lines.push(String::new());
+    lines.push(ctx.tr("security.command_mask_hint"));
+
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    for (name, bit) in PERMISSION_NAMES {
+        row.push(Button::data(
+            format!("{} {name}", if mask & bit != 0 { "✅" } else { "❌" }),
+            format!("heroku:sec:pb:{}:{}:{bit}", module.name(), command.name).into_bytes(),
+        ));
+        if row.len() == 2 {
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows.push(vec![
+        Button::data(
+            ctx.tr("security.btn_reset_mask"),
+            format!("heroku:sec:pr:{}:{}", module.name(), command.name).into_bytes(),
+        ),
+        Button::data(ctx.tr("security.btn_back"), b"heroku:sec:p".to_vec()),
+    ]);
+    rows.push(vec![Button::data("✖️ Close", b"heroku:close".to_vec())]);
+    Some((lines.join("\n"), rows))
+}
+
+pub(crate) fn global_mask_card(ctx: &Arc<Ctx>, bounding: bool) -> (String, Vec<Vec<Button>>) {
+    let mask = if bounding {
+        ctx.security.bounding_mask()
+    } else {
+        ctx.security.default_mask()
+    };
+    let mut lines = vec![ctx.tr(if bounding {
+        "security.bounding_mask_title"
+    } else {
+        "security.default_mask_title"
+    })];
+    lines.push(format!(
+        "▫️ {}: <code>{mask}</code>",
+        ctx.tr("security.current_mask")
+    ));
+    lines.push(format!(
+        "▫️ {}: {}",
+        ctx.tr("security.allowed_for"),
+        mask_to_names(mask)
+            .iter()
+            .map(|name| format!("<code>{name}</code>"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    lines.push(String::new());
+    lines.push(ctx.tr("security.command_mask_hint"));
+
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    for (name, bit) in PERMISSION_NAMES {
+        let action = if bounding { "pbd" } else { "pd" };
+        row.push(Button::data(
+            format!("{} {name}", if mask & bit != 0 { "✅" } else { "❌" }),
+            format!("heroku:sec:{action}:{bit}").into_bytes(),
+        ));
+        if row.len() == 2 {
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows.push(vec![
+        Button::data(ctx.tr("security.btn_back"), b"heroku:sec:p".to_vec()),
+        Button::data("✖️ Close", b"heroku:close".to_vec()),
+    ]);
+    (lines.join("\n"), rows)
+}
+
+pub(crate) fn querysec_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let enabled = ctx
+        .db
+        .get_bool(crate::security::NS, "allow_inline_query", false);
+    let state = ctx.tr(if enabled {
+        "inline.querysec_enabled"
+    } else {
+        "inline.querysec_disabled"
+    });
+    let html = ctx.tf("inline.querysec_card", &[&state]);
+    let buttons = vec![
+        vec![Button::data(
+            if enabled { "✅" } else { "❌" },
+            b"heroku:sec:query".to_vec(),
+        )],
+        vec![Button::data(
+            ctx.tr("security.btn_back"),
+            b"heroku:sec".to_vec(),
+        )],
+    ];
+    (html, buttons)
+}
+
+pub(crate) fn toggle_querysec(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+    let current = ctx
+        .db
+        .get_bool(crate::security::NS, "allow_inline_query", false);
+    ctx.db
+        .set(crate::security::NS, "allow_inline_query", !current);
+    querysec_card(ctx)
+}
+
+pub(crate) fn toggle_command_bit(
+    ctx: &Arc<Ctx>,
+    module_name: &str,
+    command_name: &str,
+    bit: u32,
+) -> Option<(String, Vec<Vec<Button>>)> {
+    let module = ctx.modules.get(module_name)?;
+    let command = module
+        .commands()
+        .into_iter()
+        .find(|command| command.name.eq_ignore_ascii_case(command_name))?;
+    let current = ctx
+        .security
+        .command_mask(module.name(), command.name, command.security);
+    ctx.security
+        .set_command_mask(module.name(), command.name, current ^ bit);
+    command_mask_card(ctx, module.name(), command.name)
+}
+
+pub(crate) fn toggle_global_bit(
+    ctx: &Arc<Ctx>,
+    bounding: bool,
+    bit: u32,
+) -> (String, Vec<Vec<Button>>) {
+    let current = if bounding {
+        ctx.security.bounding_mask()
+    } else {
+        ctx.security.default_mask()
+    };
+    if bounding {
+        ctx.security.set_bounding_mask(current ^ bit);
+    } else {
+        ctx.security.set_default_mask(current ^ bit);
+    }
+    global_mask_card(ctx, bounding)
 }
 
 pub(crate) fn owner_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {

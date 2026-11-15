@@ -1338,6 +1338,55 @@ impl InlineManager {
                     },
                 }
             }
+            "p" => {
+                let page = parts
+                    .get(3)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                crate::modules::heroku_security::permissions_card(ctx, page)
+            }
+            "pm" => {
+                let module = parts.get(3).copied().unwrap_or_default();
+                let command = parts.get(4).copied().unwrap_or_default();
+                crate::modules::heroku_security::command_mask_card(ctx, module, command)
+                    .unwrap_or_else(|| crate::modules::heroku_security::permissions_card(ctx, 0))
+            }
+            "pb" => {
+                let module = parts.get(3).copied().unwrap_or_default();
+                let command = parts.get(4).copied().unwrap_or_default();
+                let bit = parts
+                    .get(5)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+                crate::modules::heroku_security::toggle_command_bit(ctx, module, command, bit)
+                    .unwrap_or_else(|| crate::modules::heroku_security::permissions_card(ctx, 0))
+            }
+            "pr" => {
+                let module = parts.get(3).copied().unwrap_or_default();
+                let command = parts.get(4).copied().unwrap_or_default();
+                if let Some(module_ref) = ctx.modules.get(module) {
+                    if let Some(command_ref) = module_ref
+                        .commands()
+                        .into_iter()
+                        .find(|item| item.name.eq_ignore_ascii_case(command))
+                    {
+                        ctx.security
+                            .clear_command_mask(module_ref.name(), command_ref.name);
+                    }
+                }
+                crate::modules::heroku_security::command_mask_card(ctx, module, command)
+                    .unwrap_or_else(|| crate::modules::heroku_security::permissions_card(ctx, 0))
+            }
+            "pdef" => crate::modules::heroku_security::global_mask_card(ctx, false),
+            "pbnd" => match parts.get(3).and_then(|value| value.parse::<u32>().ok()) {
+                Some(bit) => crate::modules::heroku_security::toggle_global_bit(ctx, true, bit),
+                None => crate::modules::heroku_security::global_mask_card(ctx, true),
+            },
+            "pd" => match parts.get(3).and_then(|value| value.parse::<u32>().ok()) {
+                Some(bit) => crate::modules::heroku_security::toggle_global_bit(ctx, false, bit),
+                None => crate::modules::heroku_security::global_mask_card(ctx, false),
+            },
+            "query" => crate::modules::heroku_security::toggle_querysec(ctx),
             _ => crate::modules::heroku_security::security_card(ctx),
         };
 
@@ -1448,6 +1497,80 @@ impl InlineManager {
                 }
                 self.handle_config_callback(ctx, call, &data, sender)
                     .await?;
+            }
+            _ if data.starts_with("heroku:backup:period:") => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                let hours = data
+                    .trim_start_matches("heroku:backup:period:")
+                    .parse::<i64>()
+                    .unwrap_or(0);
+                let (html, buttons) =
+                    crate::modules::heroku_backup::set_period_from_inline(ctx, hours);
+                let text = if hours == 0 {
+                    ctx.tr("backup.period_never")
+                } else {
+                    ctx.tf("backup.period_set", &[&hours.to_string()])
+                };
+                let _ = call
+                    .answer()
+                    .text(text)
+                    .edit(
+                        InputMessage::new()
+                            .html(html)
+                            .reply_markup(ReplyMarkup::from_buttons(&buttons)),
+                    )
+                    .await;
+            }
+            "heroku:api:toggle" => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                let (html, buttons) = crate::modules::api_ratelimiter::toggle_protection(ctx);
+                let _ = call
+                    .answer()
+                    .edit(
+                        InputMessage::new()
+                            .html(html)
+                            .reply_markup(ReplyMarkup::from_buttons(&buttons)),
+                    )
+                    .await;
+            }
+            _ if data.starts_with("heroku:set:") => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                let key = data.trim_start_matches("heroku:set:");
+                if let Some((html, buttons)) =
+                    crate::modules::heroku_settings::toggle_setting(ctx, key)
+                {
+                    let _ = call
+                        .answer()
+                        .edit(
+                            InputMessage::new()
+                                .html(html)
+                                .reply_markup(ReplyMarkup::from_buttons(&buttons)),
+                        )
+                        .await;
+                } else {
+                    let _ = call.answer().send().await;
+                }
             }
             _ if data == "heroku:sec" || data.starts_with("heroku:sec:") => {
                 if !allowed {
@@ -1717,13 +1840,14 @@ impl InlineManager {
                 if ctx.translator.available().contains(&lang.as_str()) {
                     ctx.translator.set_lang(&lang);
                     ctx.db.set("heroku.translations", "lang", lang.as_str());
+                    let (html, buttons) = crate::modules::translations::language_card(ctx);
                     let _ = call
                         .answer()
-                        .text(ctx.tr("quickstart.language_saved"))
+                        .text(ctx.tf("translations.set", &[&lang]))
                         .edit(
                             InputMessage::new()
-                                .html(ctx.tr("quickstart.text"))
-                                .reply_markup(welcome_markup()),
+                                .html(html)
+                                .reply_markup(ReplyMarkup::from_buttons(&buttons)),
                         )
                         .await;
                 } else {

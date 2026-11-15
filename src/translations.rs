@@ -26,6 +26,7 @@ pub const LANGUAGES: &[&str] = &[
 pub struct Translator {
     lang: RwLock<String>,
     packs: HashMap<String, HashMap<String, String>>,
+    external: RwLock<Vec<HashMap<String, String>>>,
 }
 
 impl Translator {
@@ -47,7 +48,39 @@ impl Translator {
         Self {
             lang: RwLock::new(normalize_lang(&lang.into())),
             packs,
+            external: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Merge an external YAML/JSON language pack. Later packs take precedence.
+    /// Returns the number of loaded keys.
+    pub fn merge_external(&self, raw: &str) -> usize {
+        let mut pack = HashMap::new();
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            flatten_json("", &value, &mut pack);
+        } else if let Ok(value) = serde_yaml::from_str::<Value>(raw) {
+            flatten("", &value, &mut pack);
+        }
+        let count = pack.len();
+        if count > 0 {
+            if let Ok(mut external) = self.external.write() {
+                external.push(pack);
+            }
+        }
+        count
+    }
+
+    pub fn clear_external(&self) {
+        if let Ok(mut external) = self.external.write() {
+            external.clear();
+        }
+    }
+
+    pub fn external_count(&self) -> usize {
+        self.external
+            .read()
+            .map(|external| external.len())
+            .unwrap_or(0)
     }
 
     pub fn lang(&self) -> String {
@@ -70,6 +103,15 @@ impl Translator {
 
     /// Translate a dotted key, e.g. `help.title`.
     pub fn t(&self, key: &str) -> String {
+        if let Ok(external) = self.external.read() {
+            if let Some(value) = external
+                .iter()
+                .rev()
+                .find_map(|pack| pack.get(key).cloned())
+            {
+                return value;
+            }
+        }
         let lang = self.lang();
         if let Some(value) = self.packs.get(&lang).and_then(|pack| pack.get(key)) {
             return value.clone();
@@ -157,6 +199,31 @@ fn flatten(prefix: &str, value: &Value, out: &mut HashMap<String, String>) {
     }
 }
 
+fn flatten_json(prefix: &str, value: &serde_json::Value, out: &mut HashMap<String, String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                let next = if prefix.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_json(&next, value, out);
+            }
+        }
+        serde_json::Value::String(text) => {
+            out.insert(prefix.to_owned(), text.clone());
+        }
+        serde_json::Value::Number(number) => {
+            out.insert(prefix.to_owned(), number.to_string());
+        }
+        serde_json::Value::Bool(boolean) => {
+            out.insert(prefix.to_owned(), boolean.to_string());
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +252,18 @@ mod tests {
     fn keeps_unknown_keys() {
         let translator = Translator::new("en");
         assert_eq!(translator.t("does.not.exist"), "does.not.exist");
+    }
+
+    #[test]
+    fn merges_external_packs() {
+        let translator = Translator::new("en");
+        assert_eq!(
+            translator.merge_external("help:\n  title: External title\n"),
+            1
+        );
+        assert_eq!(translator.t("help.title"), "External title");
+        assert_eq!(translator.external_count(), 1);
+        translator.clear_external();
+        assert_ne!(translator.t("help.title"), "External title");
     }
 }

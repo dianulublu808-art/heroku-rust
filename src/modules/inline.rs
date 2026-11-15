@@ -29,6 +29,10 @@ impl Module for InlineStuff {
         "Inline bot, search, callbacks and bot PM"
     }
 
+    fn has_watcher(&self) -> bool {
+        true
+    }
+
     fn commands(&self) -> Vec<CommandDef> {
         vec![
             CommandDef::new("inline", "Show the inline bot status"),
@@ -254,6 +258,16 @@ impl InlineStuff {
     async fn inline_security(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
         let raw = args.raw.trim().trim_start_matches('.');
         if raw.is_empty() {
+            let (html, buttons) = crate::modules::heroku_security::permissions_card(ctx, 0);
+            let user_id = message.sender_id().unwrap_or(ctx.me_id);
+            if ctx
+                .inline
+                .send_to_user(ctx, user_id, html, buttons)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
             let allow = ctx.db.get_bool(SECURITY_NS, "allow_inline_query", false);
             let state = if allow {
                 ctx.tr("inline.querysec_enabled")
@@ -271,6 +285,19 @@ impl InlineStuff {
             message.reply_html(ctx.tr("common.not_found")).await?;
             return Ok(());
         };
+        let user_id = message.sender_id().unwrap_or(ctx.me_id);
+        if let Some((html, buttons)) =
+            crate::modules::heroku_security::command_mask_card(ctx, module.name(), def.name)
+        {
+            if ctx
+                .inline
+                .send_to_user(ctx, user_id, html, buttons)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
         let mask = ctx
             .security
             .command_mask(module.name(), def.name, def.security);
@@ -295,6 +322,16 @@ impl InlineStuff {
     }
 
     async fn query_security(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+        let (html, buttons) = crate::modules::heroku_security::querysec_card(ctx);
+        let user_id = message.sender_id().unwrap_or(ctx.me_id);
+        if ctx
+            .inline
+            .send_to_user(ctx, user_id, html, buttons)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
         let current = ctx.db.get_bool(SECURITY_NS, "allow_inline_query", false);
         ctx.db
             .set(SECURITY_NS, "allow_inline_query", Value::Bool(!current));

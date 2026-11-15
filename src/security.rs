@@ -149,6 +149,20 @@ impl Security {
         self.db.set(NS, "masks", Value::Object(masks));
     }
 
+    pub fn clear_command_mask(&self, module: &str, command: &str) {
+        let mut masks = self.db.get_map(NS, "masks");
+        masks.remove(&format!("{module}.{command}"));
+        self.db.set(NS, "masks", Value::Object(masks));
+    }
+
+    pub fn set_default_mask(&self, mask: u32) -> bool {
+        self.db.set(NS, "default", Value::from(mask))
+    }
+
+    pub fn set_bounding_mask(&self, mask: u32) -> bool {
+        self.db.set(NS, "bounding_mask", Value::from(mask))
+    }
+
     pub fn has_rule(&self, user_id: i64, chat_id: i64, module: &str, command: &str) -> bool {
         let now = chrono::Utc::now().timestamp();
         self.rule_matches("sgroups", user_id, chat_id, module, command, now, true)

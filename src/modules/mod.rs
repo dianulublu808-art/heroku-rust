@@ -4,15 +4,15 @@
 //! Built-in modules. Each module registers itself through the `inventory`
 //! crate, so adding a new file is enough to make it discoverable.
 
-mod api_ratelimiter;
+pub(crate) mod api_ratelimiter;
 pub(crate) mod common;
 mod eval;
 mod help;
-mod heroku_backup;
+pub(crate) mod heroku_backup;
 mod heroku_config;
 mod heroku_info;
 pub(crate) mod heroku_security;
-mod heroku_settings;
+pub(crate) mod heroku_settings;
 mod inline;
 pub mod loader;
 mod quickstart;
@@ -20,6 +20,6 @@ mod settings;
 mod terminal;
 mod test;
 mod translate;
-mod translations;
+pub(crate) mod translations;
 pub(crate) mod updater;
 pub(crate) mod web;
