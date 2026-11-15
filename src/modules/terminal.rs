@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,7 +45,6 @@ struct Running {
 #[derive(Clone)]
 struct SudoSession {
     stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
-    prompted: Arc<AtomicBool>,
 }
 
 /// Active commands keyed by the id of the message that started them.
@@ -194,7 +193,7 @@ async fn run(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
 
     let sudo_key = (message.chat_id(), message.id());
     let stdin_handle = Arc::new(AsyncMutex::new(child.stdin.take()));
-    let prompted = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicUsize::new(0));
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -211,14 +210,14 @@ async fn run(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
             _ = interval.tick() => {
                 let snapshot = snapshot(&output, &command, started, None);
                 let _ = response.edit_html(&snapshot).await;
-                if !prompted.load(Ordering::Relaxed) && sudo_prompt_seen(&output) {
-                    prompted.store(true, Ordering::Relaxed);
+                let prompts = sudo_prompt_count(&output);
+                if prompts > seen.load(Ordering::Relaxed) {
+                    seen.store(prompts, Ordering::Relaxed);
                     if let Ok(mut sudo) = SUDO.lock() {
                         sudo.insert(
                             sudo_key,
                             SudoSession {
                                 stdin: stdin_handle.clone(),
-                                prompted: prompted.clone(),
                             },
                         );
                     }
@@ -344,11 +343,11 @@ fn kill_group(pid: u32, forceful: bool) {
         .status();
 }
 
-fn sudo_prompt_seen(output: &Arc<Mutex<String>>) -> bool {
+fn sudo_prompt_count(output: &Arc<Mutex<String>>) -> usize {
     output
         .lock()
-        .map(|buffer| buffer.contains("[heroku-sudo] password:"))
-        .unwrap_or(false)
+        .map(|buffer| buffer.matches("[heroku-sudo] password:").count())
+        .unwrap_or(0)
 }
 
 /// Feed a sudo password to a running terminal command and report the result.
@@ -373,7 +372,6 @@ pub(crate) async fn submit_sudo_password(
     match stdin.write_all(format!("{password}\n").as_bytes()).await {
         Ok(()) => {
             let _ = stdin.flush().await;
-            session.prompted.store(false, Ordering::Relaxed);
             ctx.tr("terminal.sudo_sent")
         }
         Err(err) => ctx.tf("terminal.sudo_failed", &[&escape_html(&err.to_string())]),

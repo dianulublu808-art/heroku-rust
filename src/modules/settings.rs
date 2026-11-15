@@ -110,12 +110,13 @@ impl CoreMod {
         message
             .reply_html(format!(
                 "<tg-emoji emoji-id=4974681956907221809>🪐</tg-emoji> <b>Heroku {}</b>\n\
-                 <i>Telegram userbot, rewritten in Rust</i>\n\n\
+                 <i>{}</i>\n\n\
                  ▫️ {}: <b>{}</b>\n\
                  ▫️ {}: <b>{}</b>\n\
                  ▫️ {}: <b>{}</b>\n\
                  ▫️ {}: <b>{}</b>",
                 crate::config::VERSION,
+                ctx.tr("settings.heroku_subtitle"),
                 ctx.tr("info.uptime"),
                 ctx.uptime(),
                 ctx.tr("info.modules"),
@@ -520,7 +521,7 @@ impl CoreMod {
         );
 
         message
-            .reply_html(format!("🗑 <code>{}</code>", escape_html(&key)))
+            .reply_html(ctx.tf("settings.module_cleared", &[&escape_html(&key)]))
             .await?;
         Ok(())
     }
@@ -528,13 +529,13 @@ impl CoreMod {
     async fn installation(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
         message
             .reply_html(format!(
-                "🪐 <b>Heroku installation</b>\n\n\
+                "{}\n\n\
                  <pre><code class=\"language-bash\">git clone https://github.com/Heroku-userbot/Heroku\n\
                  cd Heroku\n\
                  ./install.sh</code></pre>\n\n\
-                 <i>Rust build: use <code>cargo build --release</code> and run \
-                 <code>./target/release/heroku</code>.</i>\n\n\
-                 {}",
+                 {}\n\n{}",
+                ctx.tr("settings.installation_title"),
+                ctx.tr("settings.installation_note"),
                 ctx.tr("help.support")
             ))
             .await?;

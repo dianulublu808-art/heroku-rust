@@ -211,6 +211,8 @@ async fn placeholders(ctx: &Arc<Ctx>, banner: &str) -> HashMap<String, String> {
     data.insert("kernel".to_owned(), kernel());
     data.insert("cpu".to_owned(), cpu_info());
     data.insert("htl_ver".to_owned(), "grammers 0.12".to_owned());
+    data.insert("python_ver".to_owned(), rust_version());
+    data.insert("banner_url".to_owned(), banner.to_owned());
     data.insert("git_status".to_owned(), git_status().await);
     data.insert(
         "img".to_owned(),
@@ -334,6 +336,28 @@ pub(crate) fn current_user() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "user".to_owned())
+}
+
+/// Version of the native engine shown for the legacy `{python_ver}` key.
+fn rust_version() -> String {
+    static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        std::process::Command::new("rustc")
+            .arg("-V")
+            .output()
+            .ok()
+            .and_then(|output| {
+                let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                raw.strip_prefix("rustc ").map(|version| {
+                    version
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(version)
+                        .to_owned()
+                })
+            })
+            .unwrap_or_else(|| "Rust".to_owned())
+    });
+    VERSION.clone()
 }
 
 fn os_name() -> String {

@@ -523,14 +523,16 @@ impl HerokuSecurityMod {
                 .security
                 .command_mask(module.name(), def.name, def.security);
             message
-                .reply_html(format!(
-                    "🛡 <b>{}.{}</b>\n▫️ mask: <code>{}</code>\n▫️ {}\n\n<i>.security set {} {} &lt;mask&gt;</i>",
-                    escape_html(module.name()),
-                    escape_html(def.name),
-                    mask,
-                    mask_to_names(mask).join(", "),
-                    module.name(),
-                    def.name
+                .reply_html(ctx.tf(
+                    "security.command_card",
+                    &[
+                        &escape_html(module.name()),
+                        &escape_html(def.name),
+                        &mask.to_string(),
+                        &mask_to_names(mask).join(", "),
+                        module.name(),
+                        def.name,
+                    ],
                 ))
                 .await?;
             return Ok(());
