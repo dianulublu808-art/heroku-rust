@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 use crate::args::Args;
 use crate::ctx::Ctx;
-use crate::module::{CommandDef, Module, ModuleFactory};
+use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
 use crate::tg::{escape_html, Msg};
 
 pub struct Help;
@@ -23,6 +23,71 @@ impl Module for Help {
 
     fn description(&self) -> &'static str {
         "Shows help for modules and commands"
+    }
+
+    fn config_spec(&self) -> Vec<ConfigSpec> {
+        vec![
+            ConfigSpec::new(
+                "core_emoji",
+                "Emoji for core modules in the help list",
+                ConfigDefault::Text("🪐"),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "plain_emoji",
+                "Emoji for regular modules in the help list",
+                ConfigDefault::Text("▫️"),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "empty_emoji",
+                "Emoji for modules without commands",
+                ConfigDefault::Text("🟠"),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "desc_icon",
+                "Icon shown before the help header",
+                ConfigDefault::Text("🪐"),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "command_emoji",
+                "Emoji shown before commands",
+                ConfigDefault::Text("▫️"),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "banner_url",
+                "Banner shown above the help list",
+                ConfigDefault::Text(""),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "media_quote",
+                "Show the help banner as a link preview",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "invert_media",
+                "Show the help banner below the text",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "show_preview_in_help",
+                "Show module banners in module help",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "rich_mode",
+                "Render help as Telegram rich messages",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+        ]
     }
 
     fn commands(&self) -> Vec<CommandDef> {
@@ -71,7 +136,6 @@ impl Help {
 
         let hidden = ctx.db.get_string_list("Help", "hide");
         let mut body = String::new();
-        let mut shown = 0usize;
         for module in ctx.modules.all() {
             if hidden
                 .iter()
@@ -79,12 +143,11 @@ impl Help {
             {
                 continue;
             }
-            shown += 1;
             let commands = module.commands();
             let bullet = if commands.is_empty() {
-                "🟠"
+                ctx.db.get_str("Help", "empty_emoji", "🟠")
             } else {
-                "▫️"
+                ctx.db.get_str("Help", "plain_emoji", "▫️")
             };
             body.push_str(&format!(
                 "{bullet} <b>{}</b> <code>[{}]</code>\n",
@@ -95,8 +158,11 @@ impl Help {
 
         let prefix = prefix(ctx, message);
         let footer = ctx.tf(
-            "help.hidden_shown",
-            &[&hidden.len().to_string(), &shown.to_string()],
+            "help.all_header",
+            &[
+                &ctx.modules.all().len().to_string(),
+                &hidden.len().to_string(),
+            ],
         );
         let hint = ctx.tf("help.view_hint", &[&format!("{prefix}help <module>")]);
         message
@@ -256,10 +322,12 @@ impl Help {
 
     async fn hide(&self, ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> {
         if args.list.is_empty() {
-            message.reply_html(ctx.tr("common.no_args")).await?;
+            message.reply_html(ctx.tr("help.no_mod")).await?;
             return Ok(());
         }
         let mut hidden = ctx.db.get_string_list("Help", "hide");
+        let mut newly_hidden = Vec::new();
+        let mut shown = Vec::new();
         for name in &args.list {
             let Some(module) = ctx.modules.get(name) else {
                 continue;
@@ -269,8 +337,10 @@ impl Help {
                 .position(|item| item.eq_ignore_ascii_case(module.name()))
             {
                 hidden.remove(index);
+                shown.push(module.name().to_owned());
             } else {
                 hidden.push(module.name().to_owned());
+                newly_hidden.push(module.name().to_owned());
             }
         }
         ctx.db.set(
@@ -278,14 +348,26 @@ impl Help {
             "hide",
             serde_json::Value::Array(hidden.iter().cloned().map(Into::into).collect()),
         );
+        let hidden_lines = hidden
+            .iter()
+            .map(|name| format!("👁‍🗨 <i>{}</i>", escape_html(name)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let shown_lines = shown
+            .iter()
+            .map(|name| format!("👁 <i>{}</i>", escape_html(name)))
+            .collect::<Vec<_>>()
+            .join("\n");
         message
-            .reply_html(
-                hidden
-                    .iter()
-                    .map(|name| format!("👁‍🗨 <i>{}</i>", escape_html(name)))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
+            .reply_html(ctx.tf(
+                "help.hidden_shown",
+                &[
+                    &newly_hidden.len().to_string(),
+                    &shown.len().to_string(),
+                    &hidden_lines,
+                    &shown_lines,
+                ],
+            ))
             .await?;
         Ok(())
     }

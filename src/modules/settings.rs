@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use grammers_client::message::{Button, InputMessage};
+use grammers_client::message::{Button, InputMessage, InputRichMessage};
 use serde_json::{json, Value};
 
 use crate::args::Args;
@@ -118,6 +118,35 @@ impl CoreMod {
         let build = crate::modules::heroku_info::commit_url().await;
         let htl = format!("grammers 0.12.0 #{}", grammers_tl_types::LAYER);
 
+        let branch = crate::modules::heroku_info::branch().await;
+        let branch_text = match branch.as_str() {
+            "" | "main" | "master" | "Unknown" => String::new(),
+            "beta" => ctx.tf("settings.happy_beta", &[&branch]),
+            other => ctx.tf("settings.unstable", &[other]),
+        };
+
+        if ctx.db.get_bool("CoreMod", "rich_mode", false) {
+            let mut rich = ctx.tn(
+                "settings.rich_heroku_message",
+                &[
+                    ("platform", &crate::modules::heroku_info::platform_emoji()),
+                    ("version", crate::config::VERSION),
+                    ("build", &build),
+                    ("htl_version", "grammers 0.12.0"),
+                    ("layer", &grammers_tl_types::LAYER.to_string()),
+                    ("current_user", &crate::modules::heroku_info::current_user()),
+                    ("banner_url", HEROKU_PHOTO),
+                ],
+            );
+            if !branch_text.is_empty() {
+                rich.push_str(&format!("<footer>{}</footer>", branch_text.trim()));
+            }
+            crate::protection::guard().await;
+            let input = InputMessage::new().rich_message(InputRichMessage::html(rich));
+            message.inner.reply(input).await?;
+            return Ok(());
+        }
+
         let mut html = ctx.tf(
             "settings.heroku",
             &[
@@ -129,13 +158,7 @@ impl CoreMod {
                 &htl,
             ],
         );
-
-        let branch = crate::modules::heroku_info::branch().await;
-        match branch.as_str() {
-            "" | "main" | "master" | "Unknown" => {}
-            "beta" => html.push_str(&ctx.tf("settings.happy_beta", &[&branch])),
-            other => html.push_str(&ctx.tf("settings.unstable", &[other])),
-        }
+        html.push_str(&branch_text);
 
         crate::protection::guard().await;
         let input = InputMessage::new()

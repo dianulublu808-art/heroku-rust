@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use grammers_client::message::InputMessage;
+use grammers_client::message::{Button, InputMessage, ReplyMarkup};
 use grammers_client::Client;
 use grammers_session::storages::ErasedSession;
 use grammers_session::types::{PeerId, PeerKind, PeerRef};
@@ -244,6 +244,26 @@ impl Ctx {
         let peer = PeerId::self_user().to_ambient_ref();
         self.client
             .send_message(peer, InputMessage::new().html(html.into()))
+            .await?;
+        Ok(())
+    }
+
+    /// Send a photo card to the owner's saved messages.
+    pub async fn send_self_photo(
+        &self,
+        photo: &str,
+        html: impl Into<String>,
+        buttons: Vec<Vec<Button>>,
+    ) -> Result<()> {
+        let peer = PeerId::self_user().to_ambient_ref();
+        self.client
+            .send_message(
+                peer,
+                InputMessage::new()
+                    .photo_url(photo.to_owned())
+                    .html(html.into())
+                    .reply_markup(ReplyMarkup::from_buttons(&buttons)),
+            )
             .await?;
         Ok(())
     }

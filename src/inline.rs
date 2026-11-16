@@ -1958,6 +1958,22 @@ impl InlineManager {
                     crate::modules::updater::inline_apply_update(ctx).await;
                 });
             }
+            "heroku:upd:ignore" => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
+                let _ = call
+                    .answer()
+                    .text(ctx.tr("updater.latest_disabled"))
+                    .edit(InputMessage::new().html(ctx.tr("updater.latest_disabled")))
+                    .await;
+                ctx.db.save();
+            }
             "heroku:upd:restart" => {
                 if !allowed {
                     let _ = call

@@ -78,6 +78,12 @@ impl Module for APIRatelimiterMod {
                 ConfigDefault::Int(30),
                 ConfigKind::Int,
             ),
+            ConfigSpec::new(
+                "forbidden_methods",
+                "Methods that are always blocked by the local limiter",
+                ConfigDefault::List(&[]),
+                ConfigKind::List,
+            ),
         ]
     }
 

@@ -40,11 +40,6 @@ const TOGGLES: &[(&str, &str, bool)] = &[
         "Suggest subscribing to module author channels",
         true,
     ),
-    (
-        "do_not_suggest_subscribe",
-        "Never suggest subscribing to module author channels",
-        false,
-    ),
 ];
 
 #[async_trait]
@@ -518,8 +513,19 @@ pub(crate) fn settings_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
     let mut row = Vec::new();
     for (key, _, default) in TOGGLES {
         let enabled = ctx.db.get_bool("heroku.main", key, *default);
+        // Python reuses one button for `suggest_subscribe` and flips its
+        // label depending on the current value.
+        let label = if *key == "suggest_subscribe" {
+            if enabled {
+                ctx.tr("settings.suggest_subscribe")
+            } else {
+                ctx.tr("settings.do_not_suggest_subscribe")
+            }
+        } else {
+            format!("{} {key}", if enabled { "✅" } else { "🚫" })
+        };
         row.push(Button::data(
-            format!("{} {key}", if enabled { "✅" } else { "🚫" }),
+            label,
             format!("heroku:set:{key}").into_bytes(),
         ));
         if row.len() == 2 {

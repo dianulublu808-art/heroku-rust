@@ -19,7 +19,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::args::Args;
 use crate::ctx::Ctx;
-use crate::module::{CommandDef, Module, ModuleFactory};
+use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
 use crate::tg::{escape_html, truncate, Msg};
 
 const MAX_OUTPUT: usize = 3500;
@@ -67,6 +67,15 @@ impl Module for TerminalMod {
 
     fn description(&self) -> &'static str {
         "Run shell commands on the host"
+    }
+
+    fn config_spec(&self) -> Vec<ConfigSpec> {
+        vec![ConfigSpec::new(
+            "FLOOD_WAIT_PROTECT",
+            "Delay terminal output when Telegram asks to wait",
+            ConfigDefault::Bool(true),
+            ConfigKind::Bool,
+        )]
     }
 
     fn commands(&self) -> Vec<CommandDef> {

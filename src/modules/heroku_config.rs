@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::args::Args;
 use crate::ctx::Ctx;
-use crate::module::{CommandDef, ConfigKind, ConfigSpec, Module, ModuleFactory};
+use crate::module::{CommandDef, ConfigDefault, ConfigKind, ConfigSpec, Module, ModuleFactory};
 use crate::tg::{escape_html, Msg};
 
 pub struct HerokuConfigMod;
@@ -24,6 +24,15 @@ impl Module for HerokuConfigMod {
 
     fn description(&self) -> &'static str {
         "Configure modules"
+    }
+
+    fn config_spec(&self) -> Vec<ConfigSpec> {
+        vec![ConfigSpec::new(
+            "cfg_emoji",
+            "Emoji shown in the configuration menu",
+            ConfigDefault::Text("🪐"),
+            ConfigKind::Text,
+        )]
     }
 
     fn commands(&self) -> Vec<CommandDef> {

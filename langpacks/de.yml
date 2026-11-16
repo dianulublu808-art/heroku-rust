@@ -10,6 +10,8 @@ common:
 help:
   title: "🪐 <b>Heroku-Module</b>"
   subtitle: "⚡ Rust-Edition · v{}"
+  all_header: "<b>{} Module verfügbar, {} verborgen:</b>"
+  no_mod: "🚫 <b>Gib das Modul(-e) an, das(-e) versteckt werden soll(en)</b>"
   module: "🪐 <b>{}</b>"
   module_label: "Modul"
   command: "▫️ <b>{}</b>"
@@ -19,8 +21,8 @@ help:
   no_commands: "Keine Befehle"
   commands: "Befehle"
   author: "Autor"
-  support: "🪐 <b>Heroku-Unterstützung</b>\n<a href=\"https://t.me/heroku_userbot\">Kanal</a> · <a href=\"https://github.com/Heroku-userbot/Heroku\">GitHub</a>"
-  hidden_shown: "👁‍🗨 Versteckt: {}\n👁 Gezeigt: {}"
+  support: "❔ <a href=\"https://t.me/heroku_talks\"><b>Support-Chat</b></a>\n\n💬 <a href=\"https://t.me/heroku_offtop\"><b>Offtopic-Chat</b></a>\n\n📢 <a href=\"https://t.me/heroku_ub\"><b>Offizieller Kanal</b></a>"
+  hidden_shown: "<b>{} Module verborgen, {} Module angezeigt:</b>\n{}\n{}"
   view_hint: "▫️ <code>{}</code> – Modul- oder Befehlsdetails"
   suggestions: "🔎 <b>Meinten Sie:</b>\n{}"
 
@@ -48,6 +50,7 @@ settings:
   command_not_found: "🚫 Befehl nicht gefunden"
   heroku_subtitle: "Telegram-Userbot, neu geschrieben in Rust"
   heroku: "{} <b>{}.{}.{}</b> <i>{}</i>\n\n<tg-emoji emoji-id=5289608677244811430>📁</tg-emoji> <b>heroku-tl:</b> <i>{}</i>\n\n<tg-emoji emoji-id=5228879218363872764>⌨</tg-emoji> <b>Developer: <a href=\"t.me/zetgo\">@zetgo</a></b>"
+  rich_heroku_message: "<figure><img src=\"{banner_url}\"/></figure><h1>{platform} Userbot</h1><table bordered><tr><th>Komponente</th><th>Aktuelles Release</th></tr><tr><td><b>Version</b></td><td><code>{version}</code></td></tr><tr><td><b>Build</b></td><td>{build}</td></tr><tr><td><b>Heroku TL</b></td><td><code>{htl_version}</code></td></tr><tr><td><b>API-Layer</b></td><td><code>{layer}</code></td></tr><tr><td><b>Aktueller Benutzer</b></td><td><code>{current_user}</code></td></tr><tr><td><b>Entwickler</b></td><td><a href=\"https://t.me/zetgo\">@zetgo</a></td></tr></table>"
   happy_beta: "\n\n<tg-emoji emoji-id=5465188915990255885>🌟</tg-emoji> <b>Sie sind glücklicher Besitzer der <code>{}</code> Version!</b>"
   unstable: "\n\n<tg-emoji emoji-id=5355133243773435190>❕</tg-emoji> <b>Du verwendest eine instabile Branch</b> <code>{}</code><b>!</b>"
   module_cleared: "🗑 <code>{}</code>"
@@ -68,6 +71,8 @@ settings:
   cleardb_done: "✅ Datenbank gelöscht"
   restarting: "🔄 Neustart…"
   inline_hint: "Tippen Sie auf einen Schalter, um ihn umzuschalten, oder verwenden Sie <code>.settings &lt;key&gt; on|off</code>."
+  suggest_subscribe: "✅ Abonnement für den Kanal vorschlagen"
+  do_not_suggest_subscribe: "🚫 Abonnement für den Kanal nicht vorschlagen"
   watchers_list: "👀 <b>Beobachter:</b>\n\n<blockquote expandable><b>{}</b></blockquote>"
   watcher_args: "❌ <b>Sie müssen den Namen des Beobachters angeben</b>"
   watcher_404: "❌ <b>Watcher {} nicht gefunden</b>"
@@ -408,6 +413,9 @@ updater:
   autoupdate_found: "🆕 {} neue Commit(s) verfügbar (<code>{}</code>). Führen Sie zur Installation <code>.update -f</code> aus."
   autoupdate_applying: "⬇️ Neue Version <code>{}</code> gefunden, wird automatisch aktualisiert…"
   major_update: "🆕 <b>{}</b> neue(s) Commit(s) verfügbar (<code>{}</code>). Dies ist ein großes Update. Führen Sie <code>.update -f</code> aus, um es manuell zu installieren."
+  update_required: "🆕 <b>Ein Heroku-Update ist verfügbar!</b>\n\nEine neue Version von Heroku wurde veröffentlicht.\n🔮 <b>Heroku <s>{}</s> -> {}</b>\n\n{}"
+  btn_ignore: "🚫 Ignorieren"
+  latest_disabled: "Benachrichtigungen über das neueste Update wurden deaktiviert"
 
 loader:
   verify_required: "<tg-emoji emoji-id=5188463524568926712>⚠️</tg-emoji> <b>Um die Möglichkeit zur Installation von Drittanbietermodulen freizuschalten, schließen Sie den Test in <a href=\"https://t.me/{}?start=lm_verify\">Ihrem Bot</a></b> ab"

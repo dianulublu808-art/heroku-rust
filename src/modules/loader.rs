@@ -97,6 +97,30 @@ impl Module for LoaderMod {
                 ConfigDefault::Text(""),
                 ConfigKind::Hidden,
             ),
+            ConfigSpec::new(
+                "share_link",
+                "Include a link to the module source after loading it",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "command_emoji",
+                "Emoji used for commands in module galleries",
+                ConfigDefault::Text("▫️"),
+                ConfigKind::Text,
+            ),
+            ConfigSpec::new(
+                "rich_mode",
+                "Render module cards as Telegram rich messages",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
+                "show_banner",
+                "Show the module banner in load cards",
+                ConfigDefault::Bool(true),
+                ConfigKind::Bool,
+            ),
         ]
     }
 

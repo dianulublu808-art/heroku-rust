@@ -57,6 +57,12 @@ impl Module for UpdaterMod {
                 ConfigKind::Bool,
             ),
             ConfigSpec::new(
+                "disable_notifications",
+                "Disable update notifications when autoupdate is off",
+                ConfigDefault::Bool(false),
+                ConfigKind::Bool,
+            ),
+            ConfigSpec::new(
                 "GIT_ORIGIN_URL",
                 "Git repository URL",
                 ConfigDefault::Text(DEFAULT_ORIGIN),
@@ -72,9 +78,7 @@ impl Module for UpdaterMod {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                if !ctx.db.get_bool("UpdaterMod", "autoupdate", false) {
-                    continue;
-                }
+                let autoupdate = ctx.db.get_bool("UpdaterMod", "autoupdate", false);
                 let Some(root) = repo_root() else {
                     continue;
                 };
@@ -84,6 +88,38 @@ impl Module for UpdaterMod {
                         if last == status.remote {
                             continue;
                         }
+
+                        // Python notifies about new versions even when
+                        // autoupdate is disabled, unless the owner silenced
+                        // those notifications.
+                        if !autoupdate {
+                            if ctx
+                                .db
+                                .get_bool("UpdaterMod", "disable_notifications", false)
+                            {
+                                continue;
+                            }
+                            ctx.db
+                                .set("UpdaterMod", "last_notified", status.remote.clone());
+                            let commits = format_commits(ctx.as_ref(), &status);
+                            let caption = ctx.tf(
+                                "updater.update_required",
+                                &[&status.remote, &status.remote, &commits],
+                            );
+                            let buttons = vec![vec![
+                                Button::data(
+                                    ctx.tr("updater.btn_update"),
+                                    b"heroku:upd:apply".to_vec(),
+                                ),
+                                Button::data(
+                                    ctx.tr("updater.btn_ignore"),
+                                    b"heroku:upd:ignore".to_vec(),
+                                ),
+                            ]];
+                            let _ = notify_update(ctx.as_ref(), caption, buttons).await;
+                            continue;
+                        }
+
                         ctx.db
                             .set("UpdaterMod", "last_notified", status.remote.clone());
 
@@ -102,12 +138,18 @@ impl Module for UpdaterMod {
                         });
 
                         if minor_update != Some(true) {
-                            let _ = ctx
-                                .send_self(ctx.tf(
+                            let _ = notify_update(
+                                ctx.as_ref(),
+                                ctx.tf(
                                     "updater.major_update",
                                     &[&status.behind.to_string(), &status.remote],
-                                ))
-                                .await;
+                                ),
+                                vec![vec![Button::data(
+                                    ctx.tr("updater.btn_update"),
+                                    b"heroku:upd:apply".to_vec(),
+                                )]],
+                            )
+                            .await;
                             continue;
                         }
 
@@ -598,6 +640,22 @@ pub(crate) fn repo_root() -> Option<PathBuf> {
         }
     }
     None
+}
+
+const UPDATE_PHOTO: &str =
+    "https://raw.githubusercontent.com/Heroku-userbot/assets/refs/heads/main/updated.jpg";
+
+/// Send the update card with the banner used by Python, falling back to a
+/// plain saved-messages message when the photo cannot be sent.
+async fn notify_update(ctx: &Ctx, caption: String, buttons: Vec<Vec<Button>>) -> Result<()> {
+    if ctx
+        .send_self_photo(UPDATE_PHOTO, caption.clone(), buttons)
+        .await
+        .is_err()
+    {
+        ctx.send_self(caption).await?;
+    }
+    Ok(())
 }
 
 fn format_commits(ctx: &Ctx, status: &UpdateStatus) -> String {
