@@ -49,7 +49,11 @@ impl LogBuffer {
                         level >= min_level
                             && (modules.is_empty()
                                 || modules.iter().any(|module| {
-                                    target.to_lowercase().contains(&module.to_lowercase())
+                                    // Match the module path exactly: `settings`
+                                    // must not also select `heroku_settings`.
+                                    let target = target.to_lowercase();
+                                    let module = module.to_lowercase();
+                                    target == module || target.ends_with(&format!("::{module}"))
                                 }))
                     })
                     .cloned()

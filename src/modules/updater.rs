@@ -317,6 +317,19 @@ impl UpdaterMod {
             message.reply_html(ctx.tr("updater.no_repo")).await?;
             return Ok(());
         };
+        // Python reads the first section of `CHANGELOG.md`; keep that behaviour
+        // and fall back to git history when the file is missing.
+        if let Ok(raw) = std::fs::read_to_string(root.join("CHANGELOG.md")) {
+            if let Some(section) = raw.split("##").nth(1) {
+                let section = section.trim();
+                if !section.is_empty() {
+                    message
+                        .reply_html(ctx.tf("updater.changelog", &[&escape_html(section)]))
+                        .await?;
+                    return Ok(());
+                }
+            }
+        }
         let log = git(&root, &["log", "--pretty=format:%h%x09%s", "-n", "20"]).await?;
         let mut lines = vec![ctx.tr("updater.changelog_title")];
         for line in log.lines() {

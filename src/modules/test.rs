@@ -287,12 +287,20 @@ async fn logs_command(ctx: &Arc<Ctx>, message: &Msg, args: &Args) -> Result<()> 
             level = Some(value);
             continue;
         }
-        modules.push(token.to_owned());
+        // Python resolves every non-level argument to a loaded module and
+        // aborts with `bad_module` otherwise.
+        let Some(module) = ctx.modules.get(token) else {
+            message
+                .reply_html(ctx.tf("test.bad_module", &[&escape_html(token)]))
+                .await?;
+            return Ok(());
+        };
+        modules.push(module.name().to_owned());
     }
 
     let Some(level) = level else {
         let user_id = message.sender_id().unwrap_or(ctx.me_id);
-        let (html, buttons) = level_card(ctx);
+        let (html, buttons) = level_card(ctx, &modules);
         if ctx
             .inline
             .send_to_user(ctx, user_id, html, buttons)
@@ -337,13 +345,49 @@ fn level_name(level: i32) -> String {
     .to_owned()
 }
 
-fn level_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
+/// Map a module display name to its tracing target (source module).
+fn log_target(display: &str) -> String {
+    let target = match display {
+        "APIRatelimiterMod" => "api_ratelimiter",
+        "Evaluator" => "eval",
+        "Help" => "help",
+        "HerokuBackupMod" => "heroku_backup",
+        "HerokuConfigMod" => "heroku_config",
+        "HerokuInfoMod" => "heroku_info",
+        "HerokuSecurityMod" => "heroku_security",
+        "HerokuSettingsMod" => "heroku_settings",
+        "InlineStuff" => "inline",
+        "LoaderMod" => "loader",
+        "LoaderRestrictor" => "loader_restrictor",
+        "Quickstart" => "quickstart",
+        "CoreMod" => "settings",
+        "TerminalMod" => "terminal",
+        "TestMod" => "test",
+        "Translator" => "translate",
+        "Translations" => "translations",
+        "UpdaterMod" => "updater",
+        "HerokuAccounts" => "web",
+        other => other,
+    };
+    target.to_lowercase()
+}
+
+fn log_targets(modules: &[String]) -> Vec<String> {
+    modules.iter().map(|module| log_target(module)).collect()
+}
+
+fn level_card(ctx: &Arc<Ctx>, modules: &[String]) -> (String, Vec<Vec<Button>>) {
+    let suffix = if modules.is_empty() {
+        String::new()
+    } else {
+        format!(":{}", modules.join(","))
+    };
     let mut rows = Vec::new();
     let mut row = Vec::new();
     for (name, level) in LEVELS {
         row.push(Button::data(
             (*name).to_owned(),
-            format!("heroku:logs:level:{level}").into_bytes(),
+            format!("heroku:logs:level:{level}{suffix}").into_bytes(),
         ));
         if row.len() == 2 {
             rows.push(std::mem::take(&mut row));
@@ -356,7 +400,12 @@ fn level_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
         ctx.tr("test.cancel"),
         b"heroku:close".to_vec(),
     )]);
-    (ctx.tr("test.choose_loglevel"), rows)
+    let text = if modules.is_empty() {
+        ctx.tr("test.choose_loglevel")
+    } else {
+        ctx.tf("test.choose_loglevel_of", &[&modules.join(", ")])
+    };
+    (text, rows)
 }
 
 fn confidential_card(ctx: &Arc<Ctx>, level: i32, modules: &[String]) -> (String, Vec<Vec<Button>>) {
@@ -381,7 +430,8 @@ fn confidential_card(ctx: &Arc<Ctx>, level: i32, modules: &[String]) -> (String,
 }
 
 async fn deliver_logs(ctx: &Arc<Ctx>, message: &Msg, level: i32, modules: &[String]) -> Result<()> {
-    let lines = ctx.log_buffer.select(level, modules);
+    let targets = log_targets(modules);
+    let lines = ctx.log_buffer.select(level, &targets);
     let named = level_name(level);
     if lines.is_empty() {
         message
@@ -400,7 +450,8 @@ async fn deliver_logs(ctx: &Arc<Ctx>, message: &Msg, level: i32, modules: &[Stri
 }
 
 async fn deliver_logs_call(ctx: &Arc<Ctx>, call: &CallbackQuery, level: i32, modules: &[String]) {
-    let lines = ctx.log_buffer.select(level, modules);
+    let targets = log_targets(modules);
+    let lines = ctx.log_buffer.select(level, &targets);
     let named = level_name(level);
     if lines.is_empty() {
         let _ = call
@@ -444,18 +495,25 @@ pub(crate) async fn handle_inline_callback(
     data: &str,
 ) -> Result<bool> {
     if let Some(raw) = data.strip_prefix("heroku:logs:level:") {
-        let Some(level) = raw.parse::<i32>().ok() else {
+        let (level_raw, modules) = match raw.split_once(':') {
+            Some((level, modules)) => (
+                level,
+                modules.split(',').map(str::to_owned).collect::<Vec<_>>(),
+            ),
+            None => (raw, Vec::new()),
+        };
+        let Some(level) = level_raw.parse::<i32>().ok() else {
             let _ = call.answer().send().await;
             return Ok(true);
         };
         if level < 30 {
-            let (html, buttons) = confidential_card(ctx, level, &[]);
+            let (html, buttons) = confidential_card(ctx, level, &modules);
             let message = InputMessage::new()
                 .html(html)
                 .reply_markup(ReplyMarkup::from_buttons(&buttons));
             let _ = call.answer().edit(message).await;
         } else {
-            deliver_logs_call(ctx, call, level, &[]).await;
+            deliver_logs_call(ctx, call, level, &modules).await;
         }
         return Ok(true);
     }
