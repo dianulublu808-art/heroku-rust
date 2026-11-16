@@ -586,11 +586,16 @@ impl CoreMod {
             return Ok(());
         }
 
-        // Without the inline bot the picker is unusable; fall back to the
-        // universal guide, exactly like Python's photo fallback.
-        message
-            .reply_html(ctx.tr("settings.universal_install"))
-            .await?;
+        // Without the inline bot the picker is unusable; Python falls back to
+        // the installation photo with the VDS guide as its caption.
+        let guide = ctx.tr("settings.vds_install");
+        crate::protection::guard().await;
+        let input = InputMessage::new()
+            .photo_url(INSTALL_PHOTO.to_owned())
+            .html(guide.clone());
+        if message.inner.reply(input).await.is_err() {
+            message.reply_html(guide).await?;
+        }
         Ok(())
     }
 }
