@@ -48,13 +48,7 @@ impl LogBuffer {
                         let (level, target) = parse(line);
                         level >= min_level
                             && (modules.is_empty()
-                                || modules.iter().any(|module| {
-                                    // Match the module path exactly: `settings`
-                                    // must not also select `heroku_settings`.
-                                    let target = target.to_lowercase();
-                                    let module = module.to_lowercase();
-                                    target == module || target.ends_with(&format!("::{module}"))
-                                }))
+                                || modules.iter().any(|module| target_matches(target, module)))
                     })
                     .cloned()
                     .collect()
@@ -79,6 +73,26 @@ impl LogBuffer {
 pub struct TeeWriter {
     buffer: LogBuffer,
     line: String,
+}
+
+/// Whether a log target belongs to the requested module.
+///
+/// Built-in modules use their file path (`heroku::modules::loader`), while an
+/// external file `modules/example.rs` is compiled as `heroku::ext_example`.
+/// `.logs ExampleMod`, `.logs example` and `.logs ext_example` all select it.
+fn target_matches(target: &str, module: &str) -> bool {
+    let target = target.to_lowercase();
+    let module = module.to_lowercase();
+    // Match the module path exactly: `settings` must not also select
+    // `heroku_settings`.
+    if target == module || target.ends_with(&format!("::{module}")) {
+        return true;
+    }
+    let stem = module.strip_suffix("mod").unwrap_or(&module);
+    if stem.is_empty() {
+        return false;
+    }
+    target.ends_with(&format!("::ext_{stem}"))
 }
 
 /// Parse a formatted tracing line into a numeric severity and target.
@@ -137,5 +151,20 @@ impl<'a> MakeWriter<'a> for TeeMaker {
 
     fn make_writer(&'a self) -> Self::Writer {
         self.0.make_writer()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_matches;
+
+    #[test]
+    fn matches_builtin_and_external_targets() {
+        assert!(target_matches("heroku::modules::loader", "loader"));
+        assert!(target_matches("heroku_settings", "heroku_settings"));
+        assert!(!target_matches("heroku_settings", "settings"));
+        assert!(target_matches("heroku::ext_example", "examplemod"));
+        assert!(target_matches("heroku::ext_example", "example"));
+        assert!(!target_matches("heroku::ext_exampletwo", "example"));
     }
 }

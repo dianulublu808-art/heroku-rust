@@ -59,6 +59,37 @@ The loader copies the file into this directory, runs `cargo build --release`
 and restarts the process. Build output is sent back to the chat; on failure the
 process keeps running the previous binary.
 
+## Buttons and callbacks
+
+A module can render its own buttons and handle them:
+
+```rust
+use grammers_client::message::{Button, InputMessage, ReplyMarkup};
+
+fn has_callback(&self) -> bool { true }
+
+async fn on_callback(
+    &self,
+    _ctx: &Arc<Ctx>,
+    call: &grammers_client::update::CallbackQuery,
+    data: &str,
+) -> Result<bool> {
+    if data != "mymod:ping" {
+        return Ok(false);
+    }
+    let _ = call.answer().text("pong").send().await;
+    Ok(true)
+}
+```
+
+Callbacks with the `heroku:` prefix are reserved for the core and handled
+before module dispatch.
+
+## Watchers
+
+Implement `has_watcher() -> true` and `on_message(...)` to see every incoming
+message. Return `Ok(true)` to stop command dispatch for that message.
+
 ## Notes
 
 - The same API as built-in modules is available: `ctx.db`, `ctx.inline`,

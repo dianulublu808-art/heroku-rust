@@ -2275,10 +2275,35 @@ impl InlineManager {
                 }
             }
             _ => {
-                let _ = call.answer().send().await;
+                if !self.dispatch_module_callback(ctx, call, &data).await {
+                    let _ = call.answer().send().await;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Give external and built-in modules a chance to consume callbacks they
+    /// created themselves. Built-in `heroku:*` payloads are handled above.
+    async fn dispatch_module_callback(
+        &self,
+        ctx: &Arc<Ctx>,
+        call: &CallbackQuery,
+        data: &str,
+    ) -> bool {
+        for module in ctx.modules.all() {
+            if !module.has_callback() {
+                continue;
+            }
+            match module.on_callback(ctx, call, data).await {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(err) => {
+                    warn!("Callback in {} failed: {err:#}", module.name());
+                }
+            }
+        }
+        false
     }
 }
 

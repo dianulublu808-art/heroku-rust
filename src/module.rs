@@ -206,6 +206,25 @@ pub trait Module: Send + Sync {
         false
     }
 
+    /// Whether the module handles its own inline callback buttons. Used by
+    /// `.help`/`.watchers`-style introspection, since Rust has no reflection.
+    fn has_callback(&self) -> bool {
+        false
+    }
+
+    /// Handle a callback button pressed on a message produced by this module.
+    /// Return `true` if the callback was consumed. The inline bot calls every
+    /// module that reports [`Module::has_callback`] for unknown `heroku:*`
+    /// payloads.
+    async fn on_callback(
+        &self,
+        _ctx: &Arc<Ctx>,
+        _call: &grammers_client::update::CallbackQuery,
+        _data: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     async fn on_load(&self, _ctx: &Arc<Ctx>) -> Result<()> {
         Ok(())
     }
