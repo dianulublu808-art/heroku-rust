@@ -83,6 +83,51 @@ pub enum PendingInput {
     },
 }
 
+/// How long a callback query id is remembered to suppress Telegram retries.
+const CALLBACK_DEDUP_TTL: Duration = Duration::from_secs(30);
+/// Upper bound on remembered callback ids, so a flood cannot grow the map.
+const CALLBACK_DEDUP_CAPACITY: usize = 512;
+
+/// Remembers recently handled callback queries.
+///
+/// Telegram may deliver the same callback update more than once (network
+/// retries, reconnect after a lost acknowledgement). Handling it twice would
+/// duplicate messages or toggle a setting back and forth, so identical
+/// `(sender, query_id)` pairs are ignored for [`CALLBACK_DEDUP_TTL`].
+#[derive(Default)]
+struct CallbackDedup {
+    seen: HashMap<(i64, i64), Instant>,
+}
+
+impl CallbackDedup {
+    fn is_duplicate(&mut self, key: (i64, i64), now: Instant) -> bool {
+        self.seen
+            .retain(|_, seen| now.saturating_duration_since(*seen) < CALLBACK_DEDUP_TTL);
+        while self.seen.len() >= CALLBACK_DEDUP_CAPACITY {
+            let oldest = self
+                .seen
+                .iter()
+                .min_by_key(|(_, seen)| **seen)
+                .map(|(key, _)| *key);
+            match oldest {
+                Some(oldest) => {
+                    self.seen.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+        self.seen.insert(key, now).is_some()
+    }
+}
+
+fn callback_query_id(call: &CallbackQuery) -> Option<i64> {
+    match &call.raw {
+        tl::enums::Update::BotCallbackQuery(update) => Some(update.query_id),
+        tl::enums::Update::InlineBotCallbackQuery(update) => Some(update.query_id),
+        _ => None,
+    }
+}
+
 /// Owns the optional bot connection and all inline state.
 pub struct InlineManager {
     runtime: Mutex<Option<BotRuntime>>,
@@ -90,6 +135,7 @@ pub struct InlineManager {
     started: StdMutex<Option<Instant>>,
     restarting: AtomicBool,
     pending: StdMutex<HashMap<i64, PendingInput>>,
+    callbacks: StdMutex<CallbackDedup>,
 }
 
 impl Default for InlineManager {
@@ -106,6 +152,7 @@ impl InlineManager {
             started: StdMutex::new(None),
             restarting: AtomicBool::new(false),
             pending: StdMutex::new(HashMap::new()),
+            callbacks: StdMutex::new(CallbackDedup::default()),
         }
     }
 
@@ -437,7 +484,7 @@ impl InlineManager {
 
     /// Send the interactive help cover with paginated module buttons.
     pub async fn send_help_page(&self, ctx: &Arc<Ctx>, user_id: i64, page: usize) -> Result<()> {
-        let (html, buttons) = help_page_card(ctx, page);
+        let (html, buttons) = help_page_card(ctx, page, user_id);
         self.send_to_user(ctx, user_id, html, buttons).await
     }
 
@@ -454,7 +501,7 @@ impl InlineManager {
             .iter()
             .position(|module| module.name().eq_ignore_ascii_case(module_name))
             .context("module not found")?;
-        let (html, buttons) = help_module_card(ctx, index).context("unknown module")?;
+        let (html, buttons) = help_module_card(ctx, index, user_id).context("unknown module")?;
         self.send_to_user(ctx, user_id, html, buttons).await
     }
 
@@ -1288,16 +1335,10 @@ impl InlineManager {
                 ],
             ])
         } else {
-            ReplyMarkup::from_buttons(&[
-                vec![
-                    Button::url("GitHub", GITHUB_URL),
-                    Button::url("Support", SUPPORT_URL),
-                ],
-                vec![
-                    Button::data("⚙️ Profile", b"heroku:profile".to_vec()),
-                    Button::data("📚 Help", b"heroku:help".to_vec()),
-                ],
-            ])
+            ReplyMarkup::from_buttons(&[vec![
+                Button::url("GitHub", GITHUB_URL),
+                Button::url("Support", SUPPORT_URL),
+            ]])
         };
 
         let photo = InputMessage::new()
@@ -1315,16 +1356,10 @@ impl InlineManager {
                     vec![Button::data("✖️ Close", b"heroku:close".to_vec())],
                 ])
             } else {
-                ReplyMarkup::from_buttons(&[
-                    vec![
-                        Button::url("GitHub", GITHUB_URL),
-                        Button::url("Support", SUPPORT_URL),
-                    ],
-                    vec![
-                        Button::data("⚙️ Profile", b"heroku:profile".to_vec()),
-                        Button::data("📚 Help", b"heroku:help".to_vec()),
-                    ],
-                ])
+                ReplyMarkup::from_buttons(&[vec![
+                    Button::url("GitHub", GITHUB_URL),
+                    Button::url("Support", SUPPORT_URL),
+                ]])
             };
             client
                 .send_message(peer, InputMessage::new().html(caption).reply_markup(markup))
@@ -1700,7 +1735,8 @@ impl InlineManager {
     }
 
     async fn show_help_page(&self, ctx: &Arc<Ctx>, call: &CallbackQuery, page: usize) {
-        let (html, buttons) = help_page_card(ctx, page);
+        let sender = call.sender_id().bot_api_dialog_id_unchecked();
+        let (html, buttons) = help_page_card(ctx, page, sender);
         let _ = call
             .answer()
             .edit(
@@ -1712,7 +1748,8 @@ impl InlineManager {
     }
 
     async fn show_help_module(&self, ctx: &Arc<Ctx>, call: &CallbackQuery, index: usize) {
-        let Some((html, buttons)) = help_module_card(ctx, index) else {
+        let sender = call.sender_id().bot_api_dialog_id_unchecked();
+        let Some((html, buttons)) = help_module_card(ctx, index, sender) else {
             let _ = call.answer().alert(ctx.tr("help.no_module")).send().await;
             return;
         };
@@ -1731,8 +1768,32 @@ impl InlineManager {
         let sender = call.sender_id().bot_api_dialog_id_unchecked();
         let allowed = ctx.security.is_owner(sender) || ctx.security.is_sudo(sender);
 
+        // Telegram retries callbacks that were not acknowledged in time. Drop
+        // repeats before any side effect happens, but still acknowledge them so
+        // the client does not keep a spinning button.
+        if let Some(query_id) = callback_query_id(call) {
+            let duplicate = self
+                .callbacks
+                .lock()
+                .map(|mut seen| seen.is_duplicate((sender, query_id), Instant::now()))
+                .unwrap_or(false);
+            if duplicate {
+                debug!("Ignoring duplicate callback query {query_id} from {sender}");
+                let _ = call.answer().send().await;
+                return Ok(());
+            }
+        }
+
         match data.as_str() {
             "heroku:profile" => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
                 let _ = call
                     .answer()
                     .edit(
@@ -1755,14 +1816,6 @@ impl InlineManager {
                 self.show_help_page(ctx, call, 0).await;
             }
             _ if data.starts_with("heroku:help:") => {
-                if !allowed {
-                    let _ = call
-                        .answer()
-                        .alert(ctx.tr("inline.callback_forbidden"))
-                        .send()
-                        .await;
-                    return Ok(());
-                }
                 let parts: Vec<&str> = data.split(':').collect();
                 match parts.get(2).copied() {
                     Some("p") => {
@@ -2265,6 +2318,14 @@ impl InlineManager {
                 }
             }
             _ if data.starts_with("heroku:logs:") => {
+                if !allowed {
+                    let _ = call
+                        .answer()
+                        .alert(ctx.tr("inline.callback_forbidden"))
+                        .send()
+                        .await;
+                    return Ok(());
+                }
                 if !crate::modules::test::handle_inline_callback(ctx, call, &data).await? {
                     let _ = call.answer().send().await;
                 }
@@ -2275,7 +2336,10 @@ impl InlineManager {
                 }
             }
             _ => {
-                if !self.dispatch_module_callback(ctx, call, &data).await {
+                if !self
+                    .dispatch_module_callback(ctx, call, &data, sender)
+                    .await
+                {
                     let _ = call.answer().send().await;
                 }
             }
@@ -2290,9 +2354,10 @@ impl InlineManager {
         ctx: &Arc<Ctx>,
         call: &CallbackQuery,
         data: &str,
+        sender: i64,
     ) -> bool {
         for module in ctx.modules.all() {
-            if !module.has_callback() {
+            if !module.has_callback() || !module.callback_allowed(ctx, sender) {
                 continue;
             }
             match module.on_callback(ctx, call, data).await {
@@ -2300,6 +2365,9 @@ impl InlineManager {
                 Ok(false) => {}
                 Err(err) => {
                     warn!("Callback in {} failed: {err:#}", module.name());
+                    module
+                        .on_error(ctx, &format!("callback {}", module.name()), &err)
+                        .await;
                 }
             }
         }
@@ -2457,7 +2525,28 @@ fn config_module_card(ctx: &Ctx, index: usize) -> Option<(String, Vec<Vec<Button
     Some((lines.join("\n"), rows))
 }
 
-fn help_page_card(ctx: &Ctx, page: usize) -> (String, Vec<Vec<Button>>) {
+fn privileged(ctx: &Ctx, sender: i64) -> bool {
+    sender == ctx.me_id || ctx.security.is_owner(sender) || ctx.security.is_sudo(sender)
+}
+
+fn command_visible(ctx: &Ctx, module: &str, command: &CommandDef, sender: i64) -> bool {
+    ctx.security
+        .inline_allowed(ctx.me_id, sender, module, command.name, command.security)
+}
+
+fn visible_commands(
+    ctx: &Ctx,
+    module: &Arc<dyn crate::module::Module>,
+    sender: i64,
+) -> Vec<CommandDef> {
+    module
+        .commands()
+        .into_iter()
+        .filter(|command| command_visible(ctx, module.name(), command, sender))
+        .collect()
+}
+
+fn help_page_card(ctx: &Ctx, page: usize, sender: i64) -> (String, Vec<Vec<Button>>) {
     const PAGE_SIZE: usize = 8;
     let hidden = ctx.db.get_string_list("Help", "hide");
     let visible: Vec<(usize, &Arc<dyn crate::module::Module>)> = ctx
@@ -2469,6 +2558,11 @@ fn help_page_card(ctx: &Ctx, page: usize) -> (String, Vec<Vec<Button>>) {
             !hidden
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case(module.name()))
+        })
+        // Show a user only the modules and commands their security mask allows,
+        // matching the Python help menu.
+        .filter(|(_, module)| {
+            privileged(ctx, sender) || !visible_commands(ctx, module, sender).is_empty()
         })
         .collect();
 
@@ -2488,10 +2582,14 @@ fn help_page_card(ctx: &Ctx, page: usize) -> (String, Vec<Vec<Button>>) {
         let mut row = Vec::new();
         for (index, module) in chunk {
             let name = short_module_name(module.name());
-            lines.push(format!(
-                "▫️ <b>{}</b> <code>[{}]</code>",
-                escape_html(name),
+            let count = if privileged(ctx, sender) {
                 module.commands().len()
+            } else {
+                visible_commands(ctx, module, sender).len()
+            };
+            lines.push(format!(
+                "▫️ <b>{}</b> <code>[{count}]</code>",
+                escape_html(name)
             ));
             row.push(Button::data(
                 format!("📚 {name}"),
@@ -2521,8 +2619,12 @@ fn help_page_card(ctx: &Ctx, page: usize) -> (String, Vec<Vec<Button>>) {
     (lines.join("\n"), rows)
 }
 
-fn help_module_card(ctx: &Ctx, index: usize) -> Option<(String, Vec<Vec<Button>>)> {
+fn help_module_card(ctx: &Ctx, index: usize, sender: i64) -> Option<(String, Vec<Vec<Button>>)> {
     let module = ctx.modules.all().get(index)?;
+    let commands = visible_commands(ctx, module, sender);
+    if commands.is_empty() && !privileged(ctx, sender) {
+        return None;
+    }
     let prefix = prefix(ctx);
     let mut lines = vec![
         ctx.tf("help.module", &[&escape_html(module.name())]),
@@ -2530,7 +2632,6 @@ fn help_module_card(ctx: &Ctx, index: usize) -> Option<(String, Vec<Vec<Button>>
         String::new(),
     ];
 
-    let commands = module.commands();
     if commands.is_empty() {
         lines.push(ctx.tr("help.no_commands"));
     }
@@ -2759,4 +2860,40 @@ pub(crate) fn restart_process() -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "restart is supported on Unix only",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{CallbackDedup, CALLBACK_DEDUP_CAPACITY, CALLBACK_DEDUP_TTL};
+
+    #[test]
+    fn repeated_callback_ids_are_deduplicated() {
+        let mut dedup = CallbackDedup::default();
+        let start = std::time::Instant::now();
+        assert!(!dedup.is_duplicate((1, 10), start));
+        assert!(dedup.is_duplicate((1, 10), start + Duration::from_secs(1)));
+        // A different sender or query id is a different action.
+        assert!(!dedup.is_duplicate((2, 10), start + Duration::from_secs(1)));
+        assert!(!dedup.is_duplicate((1, 11), start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn dedup_entries_expire_after_the_ttl() {
+        let mut dedup = CallbackDedup::default();
+        let start = std::time::Instant::now();
+        assert!(!dedup.is_duplicate((1, 10), start));
+        assert!(!dedup.is_duplicate((1, 10), start + CALLBACK_DEDUP_TTL + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn dedup_map_is_bounded() {
+        let mut dedup = CallbackDedup::default();
+        let start = std::time::Instant::now();
+        for id in 0..(CALLBACK_DEDUP_CAPACITY as i64 + 100) {
+            assert!(!dedup.is_duplicate((1, id), start));
+        }
+        assert!(dedup.seen.len() <= CALLBACK_DEDUP_CAPACITY);
+    }
 }

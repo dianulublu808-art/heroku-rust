@@ -38,7 +38,7 @@ use grammers_client::Client;
 use grammers_mtsender::{SenderPool, UpdatesConfiguration};
 use grammers_session::storages::{erase, SqliteSession};
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::filter::EnvFilter;
 
 use crate::config::{Cli, Config};
@@ -51,6 +51,12 @@ use crate::module::Modules;
 use crate::security::Security;
 use crate::tg::Msg;
 use crate::translations::Translator;
+
+/// Upper bound on concurrently running update handlers. Telegram can deliver a
+/// burst of messages faster than commands finish; without a cap the `JoinSet`
+/// would grow without limit.
+const MAX_HANDLER_TASKS: usize = 64;
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
@@ -167,6 +173,7 @@ async fn async_main() -> Result<()> {
         me_id,
         me_username,
         me_name,
+        loaded_modules: Ctx::new_loaded_modules(),
     });
 
     for module in ctx.modules.all() {
@@ -185,9 +192,29 @@ async fn async_main() -> Result<()> {
     }
 
     for module in ctx.modules.all() {
+        if module.api_version() > module::MODULE_API_VERSION {
+            warn!(
+                "Module {} targets API v{} but this build provides v{}",
+                module.name(),
+                module.api_version(),
+                module::MODULE_API_VERSION
+            );
+        }
+        if !ctx.module_enabled(module.name()) {
+            debug!("Module {} is disabled in settings", module.name());
+            continue;
+        }
         match module.on_load(&ctx).await {
-            Ok(()) => tracing::debug!("Loaded module {}", module.name()),
-            Err(err) => error!("Failed to load module {}: {err:#}", module.name()),
+            Ok(()) => {
+                ctx.mark_module_loaded(module.name());
+                tracing::debug!("Loaded module {}", module.name());
+            }
+            Err(err) => {
+                error!("Failed to load module {}: {err:#}", module.name());
+                module
+                    .on_error(&ctx, &format!("on_load {}", module.name()), &err)
+                    .await;
+            }
         }
     }
 
@@ -235,6 +262,11 @@ async fn async_main() -> Result<()> {
             update = updates.next() => {
                 match update {
                     Ok(Update::NewMessage(message)) => {
+                        while tasks.len() >= MAX_HANDLER_TASKS {
+                            if let Some(Err(err)) = tasks.join_next().await {
+                                error!("Message handler task panicked: {err}");
+                            }
+                        }
                         let ctx = ctx.clone();
                         let dispatcher = dispatcher.clone();
                         let message = Msg::new(message.into_inner());
@@ -243,6 +275,11 @@ async fn async_main() -> Result<()> {
                         });
                     }
                     Ok(Update::MessageEdited(message)) => {
+                        while tasks.len() >= MAX_HANDLER_TASKS {
+                            if let Some(Err(err)) = tasks.join_next().await {
+                                error!("Message handler task panicked: {err}");
+                            }
+                        }
                         let ctx = ctx.clone();
                         let dispatcher = dispatcher.clone();
                         let message = Msg::new(message.into_inner());
@@ -262,9 +299,29 @@ async fn async_main() -> Result<()> {
         }
     }
 
+    // Let in-flight handlers finish; abort only if they exceed the grace period.
+    let drain = async {
+        while let Some(result) = tasks.join_next().await {
+            if let Err(err) = result {
+                error!("Message handler task panicked: {err}");
+            }
+        }
+    };
+    if tokio::time::timeout(SHUTDOWN_GRACE, drain).await.is_err() {
+        warn!("Handlers did not finish in time; aborting them");
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+
     for module in ctx.modules.all() {
+        if !ctx.module_loaded(module.name()) {
+            continue;
+        }
         if let Err(err) = module.on_unload(&ctx).await {
             error!("Failed to unload module {}: {err:#}", module.name());
+            module
+                .on_error(&ctx, &format!("on_unload {}", module.name()), &err)
+                .await;
         }
     }
 

@@ -218,7 +218,7 @@ impl HerokuSettingsMod {
             .modules
             .all()
             .iter()
-            .filter(|module| module.has_watcher())
+            .filter(|module| module.has_any_watcher())
         {
             if !disabled.contains_key(module.name()) {
                 lines.push(format!("♻️ {}", escape_html(module.name())));
@@ -248,7 +248,7 @@ impl HerokuSettingsMod {
                 .await?;
             return Ok(());
         };
-        if !module.has_watcher() {
+        if !module.has_any_watcher() {
             message
                 .reply_html(ctx.tf("settings.watcher_404", &[&escape_html(module.name())]))
                 .await?;
@@ -331,7 +331,7 @@ impl HerokuSettingsMod {
                 .await?;
             return Ok(());
         };
-        if !module.has_watcher() {
+        if !module.has_any_watcher() {
             message
                 .reply_html(ctx.tf("settings.watcher_404", &[&escape_html(module.name())]))
                 .await?;

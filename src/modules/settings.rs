@@ -526,6 +526,30 @@ impl CoreMod {
             "disabled_modules",
             Value::Array(disabled.into_iter().map(Value::String).collect()),
         );
+
+        // Run lifecycle hooks now, so enabling or disabling a module does not
+        // require a process restart. `loaded_modules` prevents double calls.
+        let was_loaded = ctx.module_loaded(module.name());
+        if enabled && !was_loaded {
+            match module.on_load(ctx).await {
+                Ok(()) => ctx.mark_module_loaded(module.name()),
+                Err(err) => {
+                    tracing::error!("Failed to load module {}: {err:#}", module.name());
+                    module
+                        .on_error(ctx, &format!("on_load {}", module.name()), &err)
+                        .await;
+                }
+            }
+        } else if !enabled && was_loaded {
+            if let Err(err) = module.on_unload(ctx).await {
+                tracing::error!("Failed to unload module {}: {err:#}", module.name());
+                module
+                    .on_error(ctx, &format!("on_unload {}", module.name()), &err)
+                    .await;
+            }
+            ctx.mark_module_unloaded(module.name());
+        }
+
         message
             .reply_html(ctx.tf(
                 if enabled {

@@ -135,7 +135,10 @@ impl Help {
         }
 
         let hidden = ctx.db.get_string_list("Help", "hide");
+        let privileged =
+            user_id == ctx.me_id || ctx.security.is_owner(user_id) || ctx.security.is_sudo(user_id);
         let mut body = String::new();
+        let mut shown = 0usize;
         for module in ctx.modules.all() {
             if hidden
                 .iter()
@@ -143,7 +146,24 @@ impl Help {
             {
                 continue;
             }
-            let commands = module.commands();
+            let commands: Vec<CommandDef> = module
+                .commands()
+                .into_iter()
+                .filter(|command| {
+                    ctx.security.inline_allowed(
+                        ctx.me_id,
+                        user_id,
+                        module.name(),
+                        command.name,
+                        command.security,
+                    )
+                })
+                .collect();
+            // Never reveal modules the caller cannot use.
+            if commands.is_empty() && !privileged {
+                continue;
+            }
+            shown += 1;
             let bullet = if commands.is_empty() {
                 ctx.db.get_str("Help", "empty_emoji", "🟠")
             } else {
@@ -159,10 +179,7 @@ impl Help {
         let prefix = prefix(ctx, message);
         let footer = ctx.tf(
             "help.all_header",
-            &[
-                &ctx.modules.all().len().to_string(),
-                &hidden.len().to_string(),
-            ],
+            &[&shown.to_string(), &hidden.len().to_string()],
         );
         let hint = ctx.tf("help.view_hint", &[&format!("{prefix}help <module>")]);
         message
@@ -178,9 +195,11 @@ impl Help {
     async fn show(&self, ctx: &Arc<Ctx>, message: &Msg, query: &str) -> Result<()> {
         let query = query.trim().trim_start_matches('.');
         let prefix = prefix(ctx, message);
+        let user_id = message.sender_id().unwrap_or(ctx.me_id);
+        let privileged =
+            user_id == ctx.me_id || ctx.security.is_owner(user_id) || ctx.security.is_sudo(user_id);
 
         if let Some(module) = ctx.modules.get(query) {
-            let user_id = message.sender_id().unwrap_or(ctx.me_id);
             if ctx
                 .inline
                 .send_help_module(ctx, user_id, module.name())
@@ -190,7 +209,23 @@ impl Help {
                 return Ok(());
             }
 
-            let commands = module.commands();
+            let commands: Vec<CommandDef> = module
+                .commands()
+                .into_iter()
+                .filter(|command| {
+                    ctx.security.inline_allowed(
+                        ctx.me_id,
+                        user_id,
+                        module.name(),
+                        command.name,
+                        command.security,
+                    )
+                })
+                .collect();
+            if commands.is_empty() && !privileged {
+                message.reply_html(ctx.tr("help.no_module")).await?;
+                return Ok(());
+            }
             let mut body = String::new();
             for command in commands {
                 body.push_str(&ctx.tf("help.command", &[&format!("{prefix}{}", command.name)]));
@@ -234,7 +269,15 @@ impl Help {
         }
 
         let matches = ctx.modules.find_command(query);
-        if let Some((module, command)) = matches.last() {
+        if let Some((module, command)) = matches.last().filter(|(module, command)| {
+            ctx.security.inline_allowed(
+                ctx.me_id,
+                user_id,
+                module.name(),
+                command.name,
+                command.security,
+            )
+        }) {
             let usage = if command.usage.is_empty() {
                 format!("{prefix}{}", command.name)
             } else {

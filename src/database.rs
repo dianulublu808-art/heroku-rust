@@ -7,17 +7,29 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use crate::config::write_private;
 
+/// Current on-disk schema version, stored as `heroku.meta.schema`.
+///
+/// Version 1 is the owner→key→value layout inherited from Python Heroku.
+/// Bump this constant and extend [`migrate_schema`] when the layout changes.
+pub const SCHEMA_VERSION: u64 = 1;
+
+const META_OWNER: &str = "heroku.meta";
+const SCHEMA_KEY: &str = "schema";
+
 pub struct Database {
     path: PathBuf,
     data: RwLock<Map<String, Value>>,
     dirty: AtomicBool,
+    /// Serializes snapshots and disk writes so two concurrent saves cannot
+    /// interleave and publish an older snapshot over a newer one.
+    save_lock: Mutex<()>,
 }
 
 impl Database {
@@ -28,13 +40,64 @@ impl Database {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read database {}", path.display()))?;
             if !raw.trim().is_empty() {
-                match serde_json::from_str::<Value>(&raw) {
+                let parsed = serde_json::from_str::<Value>(&raw).map_err(|err| err.to_string());
+                match parsed {
                     Ok(Value::Object(object)) => map = object,
-                    Ok(_) => tracing::warn!("Database is not a JSON object, creating a new one"),
-                    Err(err) => tracing::warn!("Database is corrupted: {err}; creating a new one"),
+                    other => {
+                        let reason = match other {
+                            Ok(_) => "the document is not a JSON object".to_owned(),
+                            Err(err) => err,
+                        };
+                        tracing::warn!("Database is corrupted ({reason}); starting empty");
+                        // Never silently destroy user data: move the unreadable
+                        // file aside so it can be inspected or restored.
+                        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                        let backup = path.with_file_name(format!(
+                            "{}.corrupt-{stamp}",
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("heroku.json")
+                        ));
+                        match fs::rename(&path, &backup) {
+                            Ok(()) => tracing::warn!(
+                                "Unreadable database preserved as {}",
+                                backup.display()
+                            ),
+                            Err(err) => tracing::error!(
+                                "Failed to preserve the corrupted database {}: {err}",
+                                path.display()
+                            ),
+                        }
+                    }
+                }
+
+                // Keep an untouched copy of the original file before rewriting
+                // it, so a migration bug can never destroy user settings.
+                if map
+                    .keys()
+                    .any(|key| key.starts_with("hikka.") || key.starts_with("legacy."))
+                {
+                    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                    let backup = path.with_file_name(format!(
+                        "{}.pre-migration-{stamp}",
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("heroku.json")
+                    ));
+                    match write_private(&backup, raw.as_bytes()) {
+                        Ok(()) => {
+                            tracing::info!("Database backup before migration: {}", backup.display())
+                        }
+                        Err(err) => tracing::warn!(
+                            "Could not back up the database before migration ({}): {err}",
+                            backup.display()
+                        ),
+                    }
                 }
             }
         }
+
+        let mut needs_save = false;
 
         // Migrate old Hikka/GeekTG namespaces, exactly like the Python version did.
         // If both the old and the new namespace exist, merge their keys instead of
@@ -60,14 +123,49 @@ impl Database {
                         map.insert(target, value);
                     }
                 }
+                needs_save = true;
             }
         }
 
-        Ok(Self {
+        let stored_schema = map
+            .get(META_OWNER)
+            .and_then(Value::as_object)
+            .and_then(|meta| meta.get(SCHEMA_KEY))
+            .and_then(Value::as_u64);
+        match stored_schema {
+            Some(version) if version > SCHEMA_VERSION => {
+                // A newer build wrote this database. Keep the file intact: an
+                // older binary must not silently downgrade or drop new keys.
+                tracing::warn!(
+                    "Database schema v{version} is newer than this build (v{SCHEMA_VERSION}); \
+                     refusing to downgrade it"
+                );
+            }
+            Some(version) if version < SCHEMA_VERSION => {
+                tracing::info!("Migrating database schema v{version} → v{SCHEMA_VERSION}");
+                migrate_schema(&mut map, version);
+                set_schema(&mut map);
+                needs_save = true;
+            }
+            Some(_) => {}
+            None => {
+                set_schema(&mut map);
+                needs_save = true;
+            }
+        }
+
+        let database = Self {
             path,
             data: RwLock::new(map),
             dirty: AtomicBool::new(false),
-        })
+            save_lock: Mutex::new(()),
+        };
+        if needs_save {
+            // Persist namespace/schema migrations immediately; otherwise they
+            // would only reach disk after an unrelated setting is changed.
+            database.save();
+        }
+        Ok(database)
     }
 
     pub fn path(&self) -> &Path {
@@ -214,6 +312,11 @@ impl Database {
     }
 
     pub fn save(&self) -> bool {
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let raw = match self.data.read() {
             Ok(data) => match serde_json::to_string_pretty(&Value::Object(data.clone())) {
                 Ok(raw) => raw,
@@ -239,6 +342,37 @@ impl Database {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty.load(Ordering::Relaxed)
+    }
+}
+
+fn set_schema(map: &mut Map<String, Value>) {
+    let meta = map
+        .entry(META_OWNER.to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(meta) = meta.as_object_mut() {
+        meta.insert(SCHEMA_KEY.to_owned(), Value::from(SCHEMA_VERSION));
+    }
+}
+
+/// Bring an older database up to [`SCHEMA_VERSION`].
+///
+/// Each case must be idempotent and must never delete keys it does not
+/// understand. Version 1 is the initial Rust/Python-compatible layout, so the
+/// only upgrade from v0 is adding the schema marker itself.
+fn migrate_schema(_map: &mut Map<String, Value>, from: u64) {
+    let mut version = from;
+    while version < SCHEMA_VERSION {
+        match version {
+            0 => {
+                // v0 means "written by Python Heroku or by an early Rust build".
+                // The layout is already compatible; nothing to rewrite.
+            }
+            other => {
+                tracing::warn!("No migration registered for schema v{other}; leaving data as is");
+                break;
+            }
+        }
+        version += 1;
     }
 }
 
@@ -308,6 +442,140 @@ mod tests {
         let db = Database::open(&path).expect("open");
         assert_eq!(db.get_str("heroku.main", "prefix", ""), "?");
         assert_eq!(db.get_i64("heroku.main", "x", 0), 1);
+
+        let prefix = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .to_owned();
+        let backups: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(&format!("{prefix}.pre-migration-")))
+            .collect();
+        assert_eq!(backups.len(), 1, "migration must keep a backup");
+        for name in backups {
+            let _ = std::fs::remove_file(std::env::temp_dir().join(name));
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn preserves_a_corrupted_database() {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-corrupt-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, "{ definitely not json").expect("write fixture");
+        let db = Database::open(&path).expect("open");
+        assert_eq!(db.get_i64("missing", "key", 3), 3);
+
+        let prefix = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .to_owned();
+        let preserved: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(&format!("{prefix}.corrupt-")))
+            .collect();
+        assert_eq!(preserved.len(), 1, "corrupted database must be kept");
+
+        for name in preserved {
+            let _ = std::fs::remove_file(std::env::temp_dir().join(name));
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_saves_leave_valid_json() {
+        use std::sync::Arc;
+
+        let (db, path) = temp_db();
+        db.set("heroku.main", "prefix", ".");
+        let db = Arc::new(db);
+        let mut handles = Vec::new();
+        for worker in 0..6 {
+            let db = Arc::clone(&db);
+            handles.push(std::thread::spawn(move || {
+                for value in 0..5 {
+                    db.set("heroku.test", &format!("key{worker}"), value);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker");
+        }
+        db.set("heroku.main", "prefix", ".");
+
+        let raw = std::fs::read_to_string(&path).expect("read database");
+        let parsed: Value = serde_json::from_str(&raw).expect("valid json after concurrent saves");
+        assert!(parsed.is_object());
+        assert_eq!(db.get_i64("heroku.test", "key5", -1), 4);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn writes_the_current_schema_version_on_first_open() {
+        let (db, path) = temp_db();
+        assert_eq!(db.get_i64(META_OWNER, SCHEMA_KEY, 0), SCHEMA_VERSION as i64);
+        let raw = std::fs::read_to_string(&path).expect("database was persisted");
+        assert!(raw.contains("\"schema\""));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn does_not_downgrade_a_newer_schema() {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-db-future-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"heroku.meta":{"schema":999},"heroku.main":{"prefix":"."}}"#,
+        )
+        .expect("write fixture");
+        let db = Database::open(&path).expect("open database");
+        assert_eq!(db.get_i64(META_OWNER, SCHEMA_KEY, 0), 999);
+        assert_eq!(db.get_str("heroku.main", "prefix", ""), ".");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn persists_namespace_migration_without_another_write() {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-db-migrate-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, r#"{"hikka.main":{"prefix":"?"}}"#).expect("write fixture");
+        {
+            let db = Database::open(&path).expect("open database");
+            assert_eq!(db.get_str("heroku.main", "prefix", ""), "?");
+        }
+        let raw = std::fs::read_to_string(&path).expect("read migrated database");
+        assert!(raw.contains("heroku.main"));
+        assert!(!raw.contains("hikka.main"));
+
+        // Only remove this test's own backup: other tests run in parallel and
+        // may have their own pre-migration snapshots in the same directory.
+        let prefix = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .to_owned();
+        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&format!("{prefix}.pre-migration-")) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         let _ = std::fs::remove_file(path);
     }
 }

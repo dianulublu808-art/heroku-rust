@@ -1,5 +1,27 @@
 # Heroku Changelog
 
+## Unreleased
+
+ - security: module callbacks are owner/sudo only by default, `.logs`/`profile`
+   cards verify the sender, `.help` is filtered by the security mask
+ - database: atomic unique-temp writes with file and directory `fsync`, a save
+   mutex, corrupt-file preservation and a pre-migration snapshot
+ - database: schema version in `heroku.meta.schema`; newer schemas are never
+   downgraded, namespace migrations are persisted immediately
+ - accounts: corrupted `accounts.json` is preserved and a missing active
+   session falls back with a warning
+ - dispatcher: bounded update concurrency (64), graceful drain on shutdown and
+   lifecycle hooks only for enabled modules
+ - module API 2: `WatcherFilter` (including `no_*` media filters), named
+   watchers with edits, `on_error`, `dependencies()`, `MODULE_API_VERSION`
+ - `.togglemod` runs `on_load`/`on_unload` without restarting the process
+ - inline: duplicate callback queries are suppressed for 30 seconds
+ - logs: tokens, passwords, `api_hash`, Bearer headers and URL credentials are
+   redacted before entering the ring buffer
+ - docs: `ROADMAP.md` with the parity map and `docs/PORTING.md` with the
+   Python → Rust module porting guide
+ - install: Arch/pacman support, `curl` in Termux and a post-rustup cargo check
+
 ## 🪐 Heroku Rust 1.2.0
 
  - full rewrite of the Heroku userbot in Rust on top of `grammers`

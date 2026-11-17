@@ -6,6 +6,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -271,21 +272,58 @@ pub fn prompt_secret(message: &str) -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
+/// Atomically replace `path` with `data`, keeping the file private (`0600`).
+///
+/// The payload is written to a uniquely named temporary file in the same
+/// directory, flushed to disk, and then renamed over the destination. Unique
+/// names matter because several tasks may save different files - and even the
+/// same database - at once; a shared `.tmp` name would truncate a concurrent
+/// write and could publish a half-written file.
 pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("data");
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::write(&tmp, data)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+
+    let write = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+
+    if write.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, path)?;
+    write?;
+
+    // Best effort: make the rename itself durable across a power loss.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(directory) = fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
     Ok(())
 }
 

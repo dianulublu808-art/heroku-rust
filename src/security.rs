@@ -295,6 +295,38 @@ impl Security {
         false
     }
 
+    /// Whether `user_id` may see and run `module.command` from an inline card,
+    /// where there is no chat to evaluate. Mirrors Heroku's
+    /// `security.check(message=None)`: owners, sudo and temporary rules pass;
+    /// everyone else needs the `everyone` bit.
+    pub fn inline_allowed(
+        &self,
+        me_id: i64,
+        user_id: i64,
+        module: &str,
+        command: &str,
+        fallback: u32,
+    ) -> bool {
+        let mask = self.command_mask(module, command, fallback) & self.bounding_mask();
+        if mask == 0 {
+            return false;
+        }
+        if user_id == me_id || self.is_owner(user_id) || self.is_sudo(user_id) {
+            return true;
+        }
+        if self
+            .db
+            .get_i64_list("heroku.main", "blacklist_users")
+            .contains(&user_id)
+        {
+            return false;
+        }
+        if mask & EVERYONE != 0 {
+            return true;
+        }
+        self.has_rule(user_id, 0, module, command)
+    }
+
     pub fn sgroups(&self) -> Map<String, Value> {
         self.db.get_map(NS, "sgroups")
     }
@@ -499,4 +531,56 @@ pub fn mask_to_names(mask: u32) -> Vec<&'static str> {
         .filter(|(_, bit)| mask & bit != 0)
         .map(|(name, _)| *name)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn temp_security() -> (Security, Arc<Database>, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-security-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let db = Arc::new(Database::open(&path).expect("open database"));
+        (Security::new(db.clone()), db, path)
+    }
+
+    #[test]
+    fn inline_allowed_respects_masks_and_everyone() {
+        let (security, db, path) = temp_security();
+        let me = 1;
+        let stranger = 2;
+
+        // Default mask is OWNER and the bounding mask is OWNER, so a stranger
+        // cannot see owner-only commands.
+        assert!(security.inline_allowed(me, me, "Any", "cmd", 0));
+        assert!(!security.inline_allowed(me, stranger, "Any", "cmd", 0));
+
+        // Explicitly open the command and the bounding mask.
+        db.set(NS, "bounding_mask", Value::from(ALL));
+        security.set_command_mask("Any", "cmd", EVERYONE);
+        assert!(security.inline_allowed(me, stranger, "Any", "cmd", 0));
+
+        // Blacklist wins over EVERYONE, like in `Security::check`.
+        db.set(
+            "heroku.main",
+            "blacklist_users",
+            Value::Array(vec![Value::from(stranger)]),
+        );
+        assert!(!security.inline_allowed(me, stranger, "Any", "cmd", 0));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn zero_bounding_mask_blocks_even_the_owner() {
+        let (security, db, path) = temp_security();
+        db.set(NS, "bounding_mask", Value::from(0u32));
+        assert!(!security.inline_allowed(1, 1, "Any", "cmd", 0));
+        let _ = std::fs::remove_file(path);
+    }
 }

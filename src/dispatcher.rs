@@ -72,7 +72,7 @@ impl Dispatcher {
         }
 
         self.remember_state(ctx, &message);
-        if self.run_watchers(ctx, &message).await {
+        if self.run_watchers(ctx, &message, false).await {
             return;
         }
 
@@ -118,6 +118,9 @@ impl Dispatcher {
         }
 
         self.remember_state(ctx, &message);
+        if self.run_watchers(ctx, &message, true).await {
+            return;
+        }
 
         if let Some(prepared) = self.prepare(ctx, message).await {
             if !self
@@ -224,7 +227,7 @@ impl Dispatcher {
         false
     }
 
-    async fn run_watchers(&self, ctx: &Arc<Ctx>, message: &Msg) -> bool {
+    async fn run_watchers(&self, ctx: &Arc<Ctx>, message: &Msg, edited: bool) -> bool {
         let disabled = ctx.db.get_map("heroku.main", "disabled_watchers");
         let chat_id = message.chat_id();
 
@@ -263,11 +266,44 @@ impl Dispatcher {
                 }
             }
 
+            // Declarative watchers with filters (Module API 2).
+            for watcher in module.watchers() {
+                if !watcher.filter.matches(ctx, message, edited) {
+                    continue;
+                }
+                match module.on_watcher(ctx, watcher.name, message, edited).await {
+                    Ok(true) => return true,
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::error!(
+                            "Watcher {}.{} failed: {err:#}",
+                            module.name(),
+                            watcher.name
+                        );
+                        module
+                            .on_error(
+                                ctx,
+                                &format!("watcher {}.{}", module.name(), watcher.name),
+                                &err,
+                            )
+                            .await;
+                    }
+                }
+            }
+
+            // Legacy single-watcher API. It never sees edits, matching Python's
+            // default `editable=False`.
+            if edited || !module.has_watcher() {
+                continue;
+            }
             match module.on_message(ctx, message).await {
                 Ok(true) => return true,
                 Ok(false) => {}
                 Err(err) => {
                     tracing::error!("Watcher {} failed: {err:#}", module.name());
+                    module
+                        .on_error(ctx, &format!("watcher {}", module.name()), &err)
+                        .await;
                 }
             }
         }
@@ -490,6 +526,9 @@ impl Dispatcher {
         let name = command.name;
         if let Err(err) = module.handle(ctx, name, &message, &args).await {
             tracing::error!("Command .{name} failed: {err:#}");
+            module
+                .on_error(ctx, &format!("command .{name}"), &err)
+                .await;
             let header = ctx.tf("errors.command_failed", &[&escape_html(message.text())]);
             let text = if ctx.db.get_bool("heroku.main", "inlinelogs", true) {
                 format!(

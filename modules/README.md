@@ -83,12 +83,79 @@ async fn on_callback(
 ```
 
 Callbacks with the `heroku:` prefix are reserved for the core and handled
-before module dispatch.
+before module dispatch. By default only owners and sudo users may press your
+buttons (same gate as Heroku's callback security); override `callback_allowed`
+if a button is intentionally public.
 
 ## Watchers
 
-Implement `has_watcher() -> true` and `on_message(...)` to see every incoming
-message. Return `Ok(true)` to stop command dispatch for that message.
+The declarative API lets the dispatcher do the filtering, so your handler only
+runs for matching updates:
+
+```rust
+use crate::module::{WatcherDef, WatcherFilter};
+
+fn watchers(&self) -> Vec<WatcherDef> {
+    vec![
+        WatcherDef::new(
+            "links",
+            WatcherFilter {
+                only_pm: true,
+                no_commands: true,
+                contains: Some("https://".to_owned()),
+                ..Default::default()
+            },
+        ),
+        WatcherDef::new(
+            "edits",
+            WatcherFilter {
+                editable: Some(true),
+                chat_id: Some(-1001234567890),
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
+async fn on_watcher(
+    &self,
+    _ctx: &Arc<Ctx>,
+    watcher: &str,
+    message: &Msg,
+    edited: bool,
+) -> Result<bool> {
+    // Return Ok(true) to stop command dispatch for this update.
+    Ok(false)
+}
+```
+
+`WatcherFilter` supports `no_commands`, `only_commands`, `outgoing`,
+`editable`, `no_media`, `only_media`, `only_photos`, `only_videos`,
+`only_audios`, `only_docs`, `only_stickers`, `no_photos`, `no_videos`,
+`no_audios`, `no_docs`, `no_stickers`, `only_channels`, `only_groups`,
+`only_pm`, `no_pm`, `no_channels`, `no_groups`, `no_forwards`,
+`only_forwards`, `no_reply`, `only_reply`, `mention`, `no_mention`,
+`startswith`, `endswith`, `contains`, `regex`, `from_id` and `chat_id`.
+The field name is `no_commands` (the legacy `has_watcher()` +
+`on_message()` API is still supported, but it never receives edits).
+
+## Lifecycle, dependencies and errors
+
+```rust
+fn api_version(&self) -> u32 { crate::module::MODULE_API_VERSION }
+fn dependencies(&self) -> &'static [&'static str] { &["Loader"] }
+
+async fn on_load(&self, ctx: &Arc<Ctx>) -> Result<()> { Ok(()) }
+async fn on_unload(&self, ctx: &Arc<Ctx>) -> Result<()> { Ok(()) }
+async fn on_error(&self, ctx: &Arc<Ctx>, source: &str, error: &anyhow::Error) {}
+```
+
+- Modules are loaded after their dependencies (names are case-insensitive and
+  the `Mod` suffix is optional). Missing dependencies are ignored.
+- `on_load` is skipped for modules disabled with `.togglemod`; toggling runs the
+  hook immediately, without restarting the process.
+- `on_error` is called for failed commands, watchers, callbacks and lifecycle
+  hooks. Errors from it are logged and never propagate.
 
 ## Notes
 

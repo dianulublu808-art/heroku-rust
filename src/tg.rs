@@ -11,6 +11,7 @@ use grammers_client::message::{InputMessage, Message};
 use grammers_client::peer::Peer;
 use grammers_client::Client;
 use grammers_session::types::{PeerId, PeerKind, PeerRef};
+use grammers_tl_types as tl;
 
 static SELF_ID: AtomicI64 = AtomicI64::new(0);
 
@@ -27,6 +28,25 @@ fn dialog_id(peer: PeerId) -> i64 {
         self_id()
     } else {
         peer.bot_api_dialog_id_unchecked()
+    }
+}
+
+/// Coarse media category used by watcher filters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaKind {
+    #[default]
+    None,
+    Photo,
+    Video,
+    Audio,
+    Document,
+    Sticker,
+    Other,
+}
+
+impl MediaKind {
+    pub fn is_media(self) -> bool {
+        !matches!(self, Self::None)
     }
 }
 
@@ -148,14 +168,68 @@ impl Msg {
         self.inner.peer_id().kind() == PeerKind::User
     }
 
+    /// Broadcast channel (not a megagroup). Used by watcher filters and to
+    /// ignore edits, matching the Python dispatcher.
     pub fn is_channel(&self) -> bool {
-        self.inner.peer_id().kind() == PeerKind::Channel
+        matches!(self.peer(), Some(Peer::Channel(_)))
     }
 
-    /// Broadcast channel (not a megagroup). Used to ignore edits, matching the
-    /// Python dispatcher.
+    /// Group or megagroup. Basic groups and supergroups both resolve to
+    /// [`Peer::Group`] in grammers.
+    pub fn is_group(&self) -> bool {
+        matches!(self.peer(), Some(Peer::Group(_)))
+    }
+
     pub fn is_broadcast_channel(&self) -> bool {
-        matches!(self.peer(), Some(Peer::Channel(_)))
+        self.is_channel()
+    }
+
+    pub fn is_forwarded(&self) -> bool {
+        self.inner.forward_header().is_some()
+    }
+
+    pub fn has_reply(&self) -> bool {
+        self.inner.reply_to_message_id().is_some()
+    }
+
+    /// Coarse media type used by watcher filters.
+    pub fn media_kind(&self) -> MediaKind {
+        use grammers_client::media::Media;
+
+        let Some(media) = self.inner.media() else {
+            return MediaKind::None;
+        };
+        match media {
+            Media::Photo(_) => MediaKind::Photo,
+            Media::Sticker(_) => MediaKind::Sticker,
+            Media::Document(document) => {
+                let Some(tl::enums::Document::Document(raw)) = document.raw.document.as_ref()
+                else {
+                    return MediaKind::Document;
+                };
+                let mut audio = false;
+                let mut video = false;
+                for attribute in &raw.attributes {
+                    match attribute {
+                        tl::enums::DocumentAttribute::Audio(_) => audio = true,
+                        tl::enums::DocumentAttribute::Video(_) => video = true,
+                        _ => {}
+                    }
+                }
+                if video {
+                    MediaKind::Video
+                } else if audio {
+                    MediaKind::Audio
+                } else if raw.mime_type.starts_with("video/") {
+                    MediaKind::Video
+                } else if raw.mime_type.starts_with("audio/") {
+                    MediaKind::Audio
+                } else {
+                    MediaKind::Document
+                }
+            }
+            _ => MediaKind::Other,
+        }
     }
 
     pub fn reply_to_id(&self) -> Option<i32> {

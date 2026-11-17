@@ -49,7 +49,27 @@ impl Registry {
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        serde_json::from_str(&raw).unwrap_or_default()
+        match serde_json::from_str(&raw) {
+            Ok(registry) => registry,
+            Err(err) => {
+                tracing::warn!(
+                    "accounts registry {} is corrupted ({err}); preserving it and starting empty",
+                    path.display()
+                );
+                let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                let backup = path.with_file_name(format!("{FILE_NAME}.corrupt-{stamp}"));
+                match std::fs::rename(&path, &backup) {
+                    Ok(()) => tracing::warn!(
+                        "Corrupted account registry preserved as {}",
+                        backup.display()
+                    ),
+                    Err(rename_err) => {
+                        tracing::error!("Failed to preserve {}: {rename_err}", path.display())
+                    }
+                }
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self, data_root: &Path) -> Result<()> {
@@ -106,10 +126,23 @@ pub fn account_session_path(data_root: &Path, id: &str) -> PathBuf {
 /// the userbot.
 pub fn active_paths(data_root: &Path) -> (PathBuf, PathBuf) {
     let registry = Registry::load(data_root);
-    if let Some(account) = registry.active_account() {
-        let session = account_session_path(data_root, &account.id);
-        if session.exists() {
-            return (account_db_path(data_root, &account.id), session);
+    if let Some(active) = registry.active.as_deref() {
+        match registry.get(active) {
+            Some(account) => {
+                let session = account_session_path(data_root, &account.id);
+                if session.exists() {
+                    return (account_db_path(data_root, &account.id), session);
+                }
+                tracing::warn!(
+                    "Active account {} has no session at {}; using the default account",
+                    account.id,
+                    session.display()
+                );
+            }
+            None => tracing::warn!(
+                "Active account {:?} is missing from accounts.json; using the default account",
+                active
+            ),
         }
     }
     (Config::db_path(data_root), Config::session_path(data_root))
@@ -139,4 +172,65 @@ pub fn sanitize_id(id: &str) -> String {
 
 fn digits(raw: &str) -> String {
     raw.chars().filter(char::is_ascii_digit).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "heroku-accounts-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    #[test]
+    fn builds_stable_ids_from_phones() {
+        assert_eq!(account_id("+7 (900) 12-34-567"), "79001234567");
+        assert!(account_id("").starts_with("acc"));
+        assert_eq!(sanitize_id("../evil id"), "evilid");
+    }
+
+    #[test]
+    fn preserves_a_corrupted_registry() {
+        let root = temp_root();
+        let path = Registry::path(&root);
+        std::fs::write(&path, "{ broken").expect("write fixture");
+
+        let registry = Registry::load(&root);
+        assert!(registry.accounts.is_empty());
+        assert!(!path.exists(), "corrupted registry must be moved aside");
+
+        let preserved = std::fs::read_dir(&root)
+            .expect("read root")
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"));
+        assert!(preserved, "corrupted registry must be kept");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn falls_back_when_active_session_is_missing() {
+        let root = temp_root();
+        let registry = Registry {
+            active: Some("79001234567".to_owned()),
+            accounts: vec![Account {
+                id: "79001234567".to_owned(),
+                phone: "+79001234567".to_owned(),
+                name: String::new(),
+                username: None,
+                tg_id: 0,
+            }],
+        };
+        registry.save(&root).expect("save registry");
+
+        let (db, session) = active_paths(&root);
+        assert_eq!(db, Config::db_path(&root));
+        assert_eq!(session, Config::session_path(&root));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

@@ -3,8 +3,9 @@
 
 //! Shared runtime context available to every module.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -40,9 +41,35 @@ pub struct Ctx {
     pub me_id: i64,
     pub me_username: Option<String>,
     pub me_name: String,
+    /// Modules whose `on_load` hook completed. Kept in sync by the startup
+    /// path and `.togglemod`, so hooks never run twice.
+    pub(crate) loaded_modules: Mutex<HashSet<String>>,
 }
 
 impl Ctx {
+    pub fn new_loaded_modules() -> Mutex<HashSet<String>> {
+        Mutex::new(HashSet::new())
+    }
+
+    pub fn module_loaded(&self, name: &str) -> bool {
+        self.loaded_modules
+            .lock()
+            .map(|loaded| loaded.contains(&name.to_lowercase()))
+            .unwrap_or(false)
+    }
+
+    pub fn mark_module_loaded(&self, name: &str) {
+        if let Ok(mut loaded) = self.loaded_modules.lock() {
+            loaded.insert(name.to_lowercase());
+        }
+    }
+
+    pub fn mark_module_unloaded(&self, name: &str) {
+        if let Ok(mut loaded) = self.loaded_modules.lock() {
+            loaded.remove(&name.to_lowercase());
+        }
+    }
+
     pub fn tr(&self, key: &str) -> String {
         self.translator.t(key)
     }

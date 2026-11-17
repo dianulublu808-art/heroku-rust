@@ -7,9 +7,53 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use tracing_subscriber::fmt::MakeWriter;
 
 const LIMIT: usize = 500;
+
+/// Key/value pairs whose value must never reach `.logs`: API hashes, bot
+/// tokens, passwords and session strings. Compiled lazily and stored as
+/// `Option` so a bad pattern can never panic the logger.
+static SECRET_ASSIGNMENT: Lazy<Option<Regex>> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)\b(api_hash|bot_token|access_token|refresh_token|session_string|password|passwd|secret|token|cookie)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)"#,
+    )
+    .ok()
+});
+
+static BEARER: Lazy<Option<Regex>> =
+    Lazy::new(|| Regex::new(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}").ok());
+
+/// Telegram bot tokens look like `123456789:AA...` (35+ characters after the
+/// colon). Redact them even when no key name is present.
+static BOT_TOKEN: Lazy<Option<Regex>> =
+    Lazy::new(|| Regex::new(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b").ok());
+
+/// `scheme://user:password@host` credentials.
+static URL_CREDENTIALS: Lazy<Option<Regex>> =
+    Lazy::new(|| Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+):([^@\s/]+)@").ok());
+
+/// Remove secrets from a log line before it is stored in the ring buffer.
+/// Formatting is preserved for everything that is not a secret, so `.logs`
+/// stays useful for debugging.
+pub fn redact(line: &str) -> String {
+    let mut out = line.to_owned();
+    if let Some(regex) = BEARER.as_ref() {
+        out = regex.replace_all(&out, "${1}<redacted>").into_owned();
+    }
+    if let Some(regex) = SECRET_ASSIGNMENT.as_ref() {
+        out = regex.replace_all(&out, "${1}${2}<redacted>").into_owned();
+    }
+    if let Some(regex) = BOT_TOKEN.as_ref() {
+        out = regex.replace_all(&out, "<redacted-token>").into_owned();
+    }
+    if let Some(regex) = URL_CREDENTIALS.as_ref() {
+        out = regex.replace_all(&out, "${1}:<redacted>@").into_owned();
+    }
+    out
+}
 
 #[derive(Clone, Default)]
 pub struct LogBuffer {
@@ -19,7 +63,7 @@ pub struct LogBuffer {
 impl LogBuffer {
     pub fn push(&self, line: impl Into<String>) {
         if let Ok(mut lines) = self.lines.lock() {
-            lines.push_back(line.into());
+            lines.push_back(redact(&line.into()));
             while lines.len() > LIMIT {
                 lines.pop_front();
             }
@@ -156,7 +200,7 @@ impl<'a> MakeWriter<'a> for TeeMaker {
 
 #[cfg(test)]
 mod tests {
-    use super::target_matches;
+    use super::{redact, target_matches};
 
     #[test]
     fn matches_builtin_and_external_targets() {
@@ -166,5 +210,42 @@ mod tests {
         assert!(target_matches("heroku::ext_example", "examplemod"));
         assert!(target_matches("heroku::ext_example", "example"));
         assert!(!target_matches("heroku::ext_exampletwo", "example"));
+    }
+
+    #[test]
+    fn redacts_known_secret_shapes() {
+        let line = "INFO heroku::login: api_hash=0123456789abcdef token: \"abc.def\" password = 'hunter2' session_string=1BVtsOK";
+        let cleaned = redact(line);
+        assert!(!cleaned.contains("0123456789abcdef"));
+        assert!(!cleaned.contains("abc.def"));
+        assert!(!cleaned.contains("hunter2"));
+        assert!(!cleaned.contains("1BVtsOK"));
+        assert!(cleaned.contains("api_hash=<redacted>"));
+        assert!(cleaned.contains("token: <redacted>"));
+        assert!(cleaned.contains("password = <redacted>"));
+    }
+
+    #[test]
+    fn redacts_bearer_tokens_and_bot_tokens() {
+        let bearer = redact("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature");
+        assert!(!bearer.contains("eyJhbGciOiJIUzI1NiJ9"));
+        assert!(bearer.contains("Bearer <redacted>"));
+
+        let bot = redact("connecting with 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ");
+        assert!(!bot.contains("AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ"));
+        assert!(bot.contains("<redacted-token>"));
+    }
+
+    #[test]
+    fn redacts_url_credentials_but_keeps_the_host() {
+        let cleaned = redact("fetching https://user:s3cret@example.com/hook?x=1");
+        assert!(!cleaned.contains("s3cret"));
+        assert!(cleaned.contains("https://user:<redacted>@example.com/hook?x=1"));
+    }
+
+    #[test]
+    fn leaves_ordinary_lines_untouched() {
+        let line = "INFO heroku::dispatcher: command .help handled in 12ms";
+        assert_eq!(redact(line), line);
     }
 }

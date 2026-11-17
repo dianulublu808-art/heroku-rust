@@ -14,7 +14,7 @@ say() { printf '\033[1;36m[heroku]\033[0m %s\n' "$*"; }
 if command -v pkg >/dev/null 2>&1 && [ -n "${PREFIX:-}" ]; then
   say "Detected Termux, installing packages"
   pkg update -y || true
-  pkg install -y git rust binutils
+  pkg install -y git curl rust binutils
 # Debian / Ubuntu / WSL / UserLAnd
 elif command -v apt-get >/dev/null 2>&1; then
   SUDO=""
@@ -22,6 +22,12 @@ elif command -v apt-get >/dev/null 2>&1; then
   say "Detected apt, installing packages"
   $SUDO apt-get update -y
   $SUDO apt-get install -y git curl ca-certificates build-essential
+# Arch Linux / Manjaro
+elif command -v pacman >/dev/null 2>&1; then
+  SUDO=""
+  if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
+  say "Detected pacman, installing packages"
+  $SUDO pacman -Sy --needed --noconfirm git curl base-devel
 # Alpine
 elif command -v apk >/dev/null 2>&1; then
   say "Detected apk, installing packages"
@@ -46,9 +52,18 @@ fi
 
 if [ "$need_rustup" -eq 1 ]; then
   say "Installing Rust 1.85+ via rustup"
+  if ! command -v curl >/dev/null 2>&1; then
+    say "curl is required to install Rust" >&2
+    exit 1
+  fi
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
   # shellcheck disable=SC1090
   . "$HOME/.cargo/env"
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  say "cargo was not found after installation" >&2
+  exit 1
 fi
 
 if [ ! -d "$DIR/.git" ]; then

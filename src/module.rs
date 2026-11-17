@@ -39,6 +39,12 @@ pub const GROUP_ADMIN_ANY: u32 = GROUP_ADMIN_ADD_ADMINS
     | GROUP_ADMIN_PIN_MESSAGES
     | GROUP_ADMIN_INVITE_USERS
     | GROUP_ADMIN;
+/// Version of the module-facing API. Bumped when a source-incompatible change
+/// is made to the [`Module`] trait or its data types. Modules may declare
+/// [`Module::api_version`] and are warned at load time when they target a newer
+/// API than the host provides.
+pub const MODULE_API_VERSION: u32 = 2;
+
 pub const DEFAULT_PERMISSIONS: u32 = OWNER;
 pub const ALL: u32 = (1 << 14) - 1;
 
@@ -178,6 +184,237 @@ impl ConfigSpec {
     }
 }
 
+/// Declarative filters for a [`WatcherDef`].
+///
+/// All fields are optional and combine with logical AND, matching Heroku's
+/// watcher decorators. Media filters use [`Msg::media_kind`]. A watcher with
+/// `editable: Some(true)` also receives message edits; every other watcher only
+/// sees new messages.
+#[derive(Clone, Debug, Default)]
+pub struct WatcherFilter {
+    /// Only messages that are not commands.
+    pub no_commands: bool,
+    /// Only messages that look like commands.
+    pub only_commands: bool,
+    /// `Some(true)` — outgoing only, `Some(false)` — incoming only.
+    pub outgoing: Option<bool>,
+    /// `Some(true)` — also handle edits, `Some(false)` — new messages only.
+    pub editable: Option<bool>,
+    pub no_media: bool,
+    pub only_media: bool,
+    pub only_photos: bool,
+    pub only_videos: bool,
+    pub only_audios: bool,
+    pub only_docs: bool,
+    pub only_stickers: bool,
+    pub no_photos: bool,
+    pub no_videos: bool,
+    pub no_audios: bool,
+    pub no_docs: bool,
+    pub no_stickers: bool,
+    pub only_channels: bool,
+    pub only_groups: bool,
+    pub only_pm: bool,
+    pub no_pm: bool,
+    pub no_channels: bool,
+    pub no_groups: bool,
+    pub no_forwards: bool,
+    pub only_forwards: bool,
+    pub no_reply: bool,
+    pub only_reply: bool,
+    pub no_mention: bool,
+    pub mention: bool,
+    pub startswith: Option<String>,
+    pub endswith: Option<String>,
+    pub contains: Option<String>,
+    pub regex: Option<String>,
+    pub from_id: Option<i64>,
+    pub chat_id: Option<i64>,
+}
+
+impl WatcherFilter {
+    /// Text-only part of the filter. Exposed for unit tests and for modules
+    /// that already have a message-like value.
+    pub fn matches_text(&self, text: &str) -> bool {
+        if let Some(pattern) = &self.startswith {
+            if !text.starts_with(pattern) {
+                return false;
+            }
+        }
+        if let Some(pattern) = &self.endswith {
+            if !text.ends_with(pattern) {
+                return false;
+            }
+        }
+        if let Some(pattern) = &self.contains {
+            if !text.contains(pattern) {
+                return false;
+            }
+        }
+        if let Some(pattern) = &self.regex {
+            if !regex::Regex::new(pattern)
+                .map(|regex| regex.is_match(text))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Media part of the filter. Kept separate so it can be tested without a
+    /// real Telegram update.
+    pub fn matches_media(&self, media: crate::tg::MediaKind) -> bool {
+        use crate::tg::MediaKind;
+
+        if self.no_media && media.is_media() {
+            return false;
+        }
+        if self.only_media && !media.is_media() {
+            return false;
+        }
+        // Positive selectors are exact matches. `only_docs` intentionally also
+        // accepts videos and audio files, because Telegram stores them as
+        // documents.
+        if self.only_photos && media != MediaKind::Photo {
+            return false;
+        }
+        if self.only_videos && media != MediaKind::Video {
+            return false;
+        }
+        if self.only_audios && media != MediaKind::Audio {
+            return false;
+        }
+        if self.only_stickers && media != MediaKind::Sticker {
+            return false;
+        }
+        if self.only_docs
+            && !matches!(
+                media,
+                MediaKind::Document | MediaKind::Video | MediaKind::Audio
+            )
+        {
+            return false;
+        }
+
+        // Negative selectors mirror the Python `no_*` tags.
+        if self.no_photos && media == MediaKind::Photo {
+            return false;
+        }
+        if self.no_videos && media == MediaKind::Video {
+            return false;
+        }
+        if self.no_audios && media == MediaKind::Audio {
+            return false;
+        }
+        if self.no_stickers && media == MediaKind::Sticker {
+            return false;
+        }
+        if self.no_docs && media == MediaKind::Document {
+            return false;
+        }
+        true
+    }
+
+    /// Evaluate the complete filter against a real update.
+    pub fn matches(&self, ctx: &Ctx, message: &Msg, edited: bool) -> bool {
+        if edited && self.editable != Some(true) {
+            return false;
+        }
+
+        if let Some(expected) = self.outgoing {
+            if message.outgoing() != expected {
+                return false;
+            }
+        }
+
+        let private = message.is_private();
+        let group = message.is_group();
+        let channel = message.is_channel();
+        if self.only_pm && !private {
+            return false;
+        }
+        if self.no_pm && private {
+            return false;
+        }
+        if self.only_groups && !group {
+            return false;
+        }
+        if self.no_groups && group {
+            return false;
+        }
+        if self.only_channels && !channel {
+            return false;
+        }
+        if self.no_channels && channel {
+            return false;
+        }
+
+        if !self.matches_media(message.media_kind()) {
+            return false;
+        }
+
+        if self.no_forwards && message.is_forwarded() {
+            return false;
+        }
+        if self.only_forwards && !message.is_forwarded() {
+            return false;
+        }
+        if self.no_reply && message.has_reply() {
+            return false;
+        }
+        if self.only_reply && !message.has_reply() {
+            return false;
+        }
+        if self.mention && !message.mentioned() {
+            return false;
+        }
+        if self.no_mention && message.mentioned() {
+            return false;
+        }
+        if let Some(expected) = self.from_id {
+            if message.sender_id() != Some(expected) {
+                return false;
+            }
+        }
+        if let Some(expected) = self.chat_id {
+            if message.chat_id() != expected {
+                return false;
+            }
+        }
+
+        let text = message.text();
+        if self.no_commands && is_command_text(ctx, message, text) {
+            return false;
+        }
+        if self.only_commands && !is_command_text(ctx, message, text) {
+            return false;
+        }
+        self.matches_text(text)
+    }
+}
+
+fn is_command_text(ctx: &Ctx, message: &Msg, text: &str) -> bool {
+    let sender = message.sender_id().unwrap_or(ctx.me_id);
+    let text = text.trim_start();
+    ctx.prefixes(sender)
+        .iter()
+        .any(|prefix| !prefix.is_empty() && text.starts_with(prefix.as_str()))
+}
+
+/// A named watcher handled by [`Module::on_watcher`].
+#[derive(Clone, Debug)]
+pub struct WatcherDef {
+    pub name: &'static str,
+    pub filter: WatcherFilter,
+}
+
+impl WatcherDef {
+    pub const fn new(name: &'static str, filter: WatcherFilter) -> Self {
+        Self { name, filter }
+    }
+}
+
 #[async_trait]
 pub trait Module: Send + Sync {
     fn name(&self) -> &'static str;
@@ -200,16 +437,61 @@ pub trait Module: Send + Sync {
         true
     }
 
-    /// Whether the module implements [`Module::on_message`]. Used by
+    /// Version of the module API this module was written against.
+    fn api_version(&self) -> u32 {
+        MODULE_API_VERSION
+    }
+
+    /// Module names that must be loaded first. Names are matched
+    /// case-insensitively and the `Mod` suffix is optional.
+    fn dependencies(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Legacy watcher: see [`Module::on_message`]. Used by
     /// `.watchers` / `.watcher`, since Rust has no runtime reflection.
     fn has_watcher(&self) -> bool {
         false
     }
 
+    /// Declarative watchers with filters. Prefer this over [`Module::on_message`]
+    /// for new modules.
+    fn watchers(&self) -> Vec<WatcherDef> {
+        Vec::new()
+    }
+
+    /// Whether the module has any watcher, legacy or declarative.
+    fn has_any_watcher(&self) -> bool {
+        self.has_watcher() || !self.watchers().is_empty()
+    }
+
+    /// Called for each matching [`WatcherDef`]. Return `true` to stop dispatch
+    /// of this update to other watchers and commands.
+    async fn on_watcher(
+        &self,
+        _ctx: &Arc<Ctx>,
+        _watcher: &str,
+        _message: &Msg,
+        _edited: bool,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Called when a command, watcher, callback or lifecycle hook fails.
+    /// Errors from this hook are logged and never propagate.
+    async fn on_error(&self, _ctx: &Arc<Ctx>, _source: &str, _error: &anyhow::Error) {}
+
     /// Whether the module handles its own inline callback buttons. Used by
     /// `.help`/`.watchers`-style introspection, since Rust has no reflection.
     fn has_callback(&self) -> bool {
         false
+    }
+
+    /// Whether `sender` may press this module's buttons. Defaults to the gate
+    /// Heroku applies to module callback handlers (owner/sudo only). Override
+    /// this for buttons that are intentionally public.
+    fn callback_allowed(&self, ctx: &Arc<Ctx>, sender: i64) -> bool {
+        ctx.security.is_owner(sender) || ctx.security.is_sudo(sender)
     }
 
     /// Handle a callback button pressed on a message produced by this module.
@@ -243,6 +525,57 @@ pub trait Module: Send + Sync {
         -> Result<()>;
 }
 
+fn module_name_matches(candidate: &str, wanted: &str) -> bool {
+    candidate.eq_ignore_ascii_case(wanted)
+        || candidate
+            .strip_suffix("Mod")
+            .is_some_and(|short| short.eq_ignore_ascii_case(wanted))
+        || wanted
+            .strip_suffix("Mod")
+            .is_some_and(|short| candidate.eq_ignore_ascii_case(short))
+}
+
+/// Stable topological ordering: independent modules stay alphabetical, but a
+/// module always appears after its declared dependencies. Missing dependencies
+/// are ignored (documented modules may be optional) and cycles fall back to
+/// name order instead of dropping modules.
+pub(crate) fn order_by_dependencies(mut modules: Vec<Arc<dyn Module>>) -> Vec<Arc<dyn Module>> {
+    modules.sort_by(|left, right| left.name().cmp(right.name()));
+    let known: Vec<String> = modules
+        .iter()
+        .map(|module| module.name().to_owned())
+        .collect();
+    let mut ordered: Vec<Arc<dyn Module>> = Vec::with_capacity(modules.len());
+    let mut pending = modules;
+
+    while !pending.is_empty() {
+        let mut index = 0;
+        let mut progressed = false;
+        while index < pending.len() {
+            let ready = pending[index].dependencies().iter().all(|dependency| {
+                let exists = known
+                    .iter()
+                    .any(|name| module_name_matches(name, dependency));
+                !exists
+                    || ordered
+                        .iter()
+                        .any(|module| module_name_matches(module.name(), dependency))
+            });
+            if ready {
+                ordered.push(pending.remove(index));
+                progressed = true;
+            } else {
+                index += 1;
+            }
+        }
+        if !progressed {
+            tracing::warn!("Circular module dependencies; loading the rest by name");
+            ordered.append(&mut pending);
+        }
+    }
+    ordered
+}
+
 pub struct ModuleFactory(pub fn() -> Box<dyn Module>);
 
 inventory::collect!(ModuleFactory);
@@ -255,11 +588,11 @@ pub struct Modules {
 
 impl Modules {
     pub fn discover() -> Self {
-        let mut modules: Vec<Arc<dyn Module>> = inventory::iter::<ModuleFactory>
+        let modules: Vec<Arc<dyn Module>> = inventory::iter::<ModuleFactory>
             .into_iter()
             .map(|factory| Arc::from((factory.0)()) as Arc<dyn Module>)
             .collect();
-        modules.sort_by_key(|module| module.name());
+        let modules = order_by_dependencies(modules);
 
         let mut by_name = HashMap::new();
         let mut commands: HashMap<String, Vec<usize>> = HashMap::new();
@@ -382,5 +715,130 @@ mod tests {
         assert!(modules.get("CoreMod").is_some());
         assert!(modules.get("core").is_some());
         assert!(modules.get("nope").is_none());
+    }
+
+    #[test]
+    fn watcher_text_filters_combine() {
+        let filter = WatcherFilter {
+            startswith: Some(".test".to_owned()),
+            contains: Some("needle".to_owned()),
+            endswith: Some("!".to_owned()),
+            ..Default::default()
+        };
+        assert!(filter.matches_text(".test a needle b!"));
+        assert!(!filter.matches_text(".other needle!"));
+        assert!(!filter.matches_text(".test needle"));
+
+        let regex = WatcherFilter {
+            regex: Some(r"^\d{3}-\d{2}$".to_owned()),
+            ..Default::default()
+        };
+        assert!(regex.matches_text("123-45"));
+        assert!(!regex.matches_text("123-456"));
+
+        let broken = WatcherFilter {
+            regex: Some("(".to_owned()),
+            ..Default::default()
+        };
+        assert!(!broken.matches_text("anything"));
+    }
+
+    #[test]
+    fn watcher_media_filters_include_and_exclude() {
+        use crate::tg::MediaKind;
+
+        let only_photos = WatcherFilter {
+            only_photos: true,
+            ..Default::default()
+        };
+        assert!(only_photos.matches_media(MediaKind::Photo));
+        assert!(!only_photos.matches_media(MediaKind::Video));
+        assert!(!only_photos.matches_media(MediaKind::None));
+
+        let documents = WatcherFilter {
+            only_docs: true,
+            ..Default::default()
+        };
+        assert!(documents.matches_media(MediaKind::Document));
+        assert!(documents.matches_media(MediaKind::Video));
+        assert!(documents.matches_media(MediaKind::Audio));
+        assert!(!documents.matches_media(MediaKind::Photo));
+
+        let no_photos = WatcherFilter {
+            no_photos: true,
+            ..Default::default()
+        };
+        assert!(!no_photos.matches_media(MediaKind::Photo));
+        assert!(no_photos.matches_media(MediaKind::Video));
+        assert!(no_photos.matches_media(MediaKind::None));
+
+        let text_only = WatcherFilter {
+            no_media: true,
+            ..Default::default()
+        };
+        assert!(text_only.matches_media(MediaKind::None));
+        assert!(!text_only.matches_media(MediaKind::Sticker));
+
+        let media_only = WatcherFilter {
+            only_media: true,
+            ..Default::default()
+        };
+        assert!(!media_only.matches_media(MediaKind::None));
+        assert!(media_only.matches_media(MediaKind::Document));
+    }
+
+    struct Dummy {
+        name: &'static str,
+        deps: &'static [&'static str],
+    }
+
+    #[async_trait]
+    impl Module for Dummy {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn dependencies(&self) -> &'static [&'static str] {
+            self.deps
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &Arc<Ctx>,
+            _command: &str,
+            _message: &Msg,
+            _args: &Args,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dependencies_are_loaded_first() {
+        let modules: Vec<Arc<dyn Module>> = vec![
+            Arc::new(Dummy {
+                name: "ChildMod",
+                deps: &["Base"],
+            }),
+            Arc::new(Dummy {
+                name: "Base",
+                deps: &[],
+            }),
+            Arc::new(Dummy {
+                name: "AlsoMod",
+                deps: &["childmod"],
+            }),
+            Arc::new(Dummy {
+                name: "MissingDepMod",
+                deps: &["does-not-exist"],
+            }),
+        ];
+        let ordered = order_by_dependencies(modules);
+        let names: Vec<&str> = ordered.iter().map(|module| module.name()).collect();
+        let position = |name: &str| names.iter().position(|item| *item == name).expect(name);
+
+        assert!(position("Base") < position("ChildMod"));
+        assert!(position("ChildMod") < position("AlsoMod"));
+        assert!(names.contains(&"MissingDepMod"));
     }
 }

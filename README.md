@@ -287,7 +287,9 @@ module and registers it with `inventory`. Install one from a URL:
 The loader copies the file into the repository `modules/` directory, runs
 `cargo build --release` and restarts. Build errors are reported in the chat and
 the previous binary keeps running. See `modules/README.md` and
-`modules/example.rs` for a complete template.
+`modules/example.rs` for a complete template, and
+[`docs/PORTING.md`](docs/PORTING.md) for a Python → Rust mapping of the module
+API (commands, watchers, callbacks, config and lifecycle).
 
 Python modules from the original Heroku repositories are still downloaded,
 stored and backed up, but they are not executed: they have to be ported to
