@@ -9,9 +9,9 @@ same permission bitmasks, while replacing the Python runtime and virtualenv with
 native Rust modules and keeping the module repository workflow.
 
 > **Status:** working userbot with inline mode, multi-account switching, the
-> module repository loader, backups and local API flood protection. Python
-> modules themselves are still not executable inside the Rust binary (see
-> [Roadmap](#roadmap)).
+> module repository loader, backups and local API flood protection. Modules are
+> real Rust files compiled into the binary — see
+> [External Rust modules](#external-rust-modules).
 
 ---
 
@@ -37,6 +37,10 @@ native Rust modules and keeping the module repository workflow.
 - Module repository workflow: `.addrepo`, `.delrepo`, `.dlmall`, `.ml`,
   `.dlmod`, `.clearmodules` download real module files over HTTP(S), plus
   `.backupmods` / `.restoremods` archives.
+- External Rust modules: any `modules/*.rs` file is compiled into the binary by
+  `build.rs` and registered through `inventory`, so community modules have the
+  same API and speed as built-in ones. The loader mirrors installed `.rs` files
+  into the repository, rebuilds and restarts automatically.
 - Local API flood protection with a sliding request window, freeze, owner
   warning and `.suspend_api_protect`.
 - Graceful shutdown, colored logs kept in a ring buffer for `.logs`.
@@ -44,18 +48,33 @@ native Rust modules and keeping the module repository workflow.
 ## Requirements
 
 - Rust 1.85+ (edition 2021)
-- A C toolchain, `pkg-config` and SQLite headers (`libsqlite3-dev` / `libsqlite`)
+- A C toolchain and linker (`build-essential` on Debian, `clang`/`binutils` on Termux)
 - Telegram `api_id` and `api_hash` from <https://my.telegram.org/apps>
+
+SQLite is not required: sessions use the bundled pure-Rust `libsql` storage.
 
 On Debian/Ubuntu:
 
 ```bash
-sudo apt-get install build-essential pkg-config libsqlite3-dev
+sudo apt-get install build-essential
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
+
 
 ## Build
 
+The fastest way — the installer picks the right package manager, clones the
+repository, builds the release binary and starts Heroku:
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/dianulublu808-art/heroku-rust/main/install.sh | bash
+```
+
+Or build manually:
+
+```bash
+git clone https://github.com/dianulublu808-art/heroku-rust
+cd heroku-rust
 cargo build --release
 ./target/release/heroku
 ```
@@ -66,8 +85,9 @@ directory with your data, and run it.
 ### Termux (Android)
 
 ```bash
-pkg install rust clang pkg-config libsqlite
-cd ~/heroku-rust
+pkg install git rust binutils
+git clone https://github.com/dianulublu808-art/heroku-rust
+cd heroku-rust
 cargo build --release
 ./target/release/heroku --data-root "$PWD/data"
 ```
@@ -254,17 +274,24 @@ group_admin_add_admins=16 ... group_admin=1024
 group_member=2048 pm=4096 everyone=8192
 ```
 
-## Roadmap
+## External Rust modules
 
-These parts of the Python project are intentionally **not** ported yet. The
-corresponding commands answer with an honest message instead of failing
-silently.
+Modules are ordinary Rust files in `modules/`. A file exposes `pub struct
+Module` implementing `crate::module::Module`; `build.rs` declares it as a crate
+module and registers it with `inventory`. Install one from a URL:
 
-- [ ] Executing downloaded Python modules inside the Rust process (files are
-      downloaded, stored and backed up, but not imported)
-- [ ] Self-update from git (`updater` only reports status)
-- [ ] `terminate` process tracking (commands have a timeout instead)
-- [ ] Media-specific modules from the Python repo (notes, music, stickers, etc.)
+```text
+.loadmod https://example.com/MyMod.rs
+```
+
+The loader copies the file into the repository `modules/` directory, runs
+`cargo build --release` and restarts. Build errors are reported in the chat and
+the previous binary keeps running. See `modules/README.md` and
+`modules/example.rs` for a complete template.
+
+Python modules from the original Heroku repositories are still downloaded,
+stored and backed up, but they are not executed: they have to be ported to
+Rust.
 
 ## Development
 

@@ -26,6 +26,10 @@ mod tg;
 mod translations;
 mod ziparch;
 
+// External Rust modules from `modules/*.rs` are compiled into the binary by
+// `build.rs` and registered through `inventory` just like built-in modules.
+include!(concat!(env!("OUT_DIR"), "/external_modules.rs"));
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};

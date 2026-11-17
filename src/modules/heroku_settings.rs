@@ -509,20 +509,33 @@ pub(crate) fn settings_card(ctx: &Arc<Ctx>) -> (String, Vec<Vec<Button>>) {
     lines.push(String::new());
     lines.push(ctx.tr("settings.inline_hint"));
 
+    // Python's settings card exposes four switches; the remaining config
+    // values are changed through `.settings <key> on|off`.
+    const CARD_KEYS: &[&str] = &["no_nickname", "grep", "inlinelogs", "suggest_subscribe"];
     let mut rows = Vec::new();
     let mut row = Vec::new();
-    for (key, _, default) in TOGGLES {
-        let enabled = ctx.db.get_bool("heroku.main", key, *default);
-        // Python reuses one button for `suggest_subscribe` and flips its
-        // label depending on the current value.
-        let label = if *key == "suggest_subscribe" {
-            if enabled {
-                ctx.tr("settings.suggest_subscribe")
-            } else {
-                ctx.tr("settings.do_not_suggest_subscribe")
+    for key in CARD_KEYS {
+        let (_, _, default) = TOGGLES
+            .iter()
+            .find(|(name, _, _)| name == key)
+            .copied()
+            .expect("settings toggle is registered");
+        let enabled = ctx.db.get_bool("heroku.main", key, default);
+        let mark = if enabled { "✅" } else { "🚫" };
+        let label = match *key {
+            // Python reuses one button for `suggest_subscribe` and flips its
+            // label depending on the current value.
+            "suggest_subscribe" => {
+                if enabled {
+                    ctx.tr("settings.suggest_subscribe")
+                } else {
+                    ctx.tr("settings.do_not_suggest_subscribe")
+                }
             }
-        } else {
-            format!("{} {key}", if enabled { "✅" } else { "🚫" })
+            "no_nickname" => format!("{mark} NoNick"),
+            "grep" => format!("{mark} Grep"),
+            "inlinelogs" => format!("{mark} InlineLogs"),
+            other => format!("{mark} {other}"),
         };
         row.push(Button::data(
             label,

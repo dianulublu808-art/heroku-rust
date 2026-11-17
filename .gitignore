@@ -4,7 +4,10 @@
 /sessions/
 /backups/
 /plugins/
-/modules/
+/modules/*
+!/modules/.gitkeep
+!/modules/README.md
+!/modules/example.rs
 /accounts/
 /accounts.json
 *.session

@@ -3,11 +3,15 @@
 
 //! Module loader: repositories, downloads and local module storage.
 //!
-//! Rust modules are linked into the binary at compile time, but the loader still
-//! implements the real repository workflow used by Heroku: it fetches module
-//! indexes (`full.txt`), downloads module files into `modules/` and keeps them
-//! in sync so they can be reviewed, backed up and restored. Files are executed
-//! only if they are compiled into the binary, which is reported honestly.
+//! Rust modules are compiled into the binary. The loader implements the real
+//! repository workflow used by Heroku: it fetches module indexes (`full.txt`),
+//! downloads module files into `modules/` and keeps them in sync so they can be
+//! reviewed, backed up and restored.
+//!
+//! `.rs` files are additionally mirrored into the repository `modules/`
+//! directory, rebuilt with `cargo build --release` and loaded after a restart.
+//! Python modules are stored and backed up but are not executed: they must be
+//! ported to Rust.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -287,10 +291,14 @@ impl LoaderMod {
         }
 
         let mut installed = 0usize;
+        let mut rust = false;
         let mut failed = Vec::new();
         for entry in modules {
             match install_entry(ctx, &repo, &entry).await {
-                Ok(_) => installed += 1,
+                Ok(path) => {
+                    installed += 1;
+                    rust |= is_rust_module(&path);
+                }
                 Err(err) => failed.push(format!(
                     "▫️ <code>{}</code> — {}",
                     escape_html(&entry),
@@ -311,6 +319,9 @@ impl LoaderMod {
             text.push('\n');
             text.push_str(&failed.join("\n"));
             message.reply_html(text).await?;
+        }
+        if rust {
+            finish_rust_change(ctx, Some(message), true).await?;
         }
         Ok(())
     }
@@ -384,6 +395,9 @@ impl LoaderMod {
                 &[&escape_html(&display_name(&path))],
             ))
             .await?;
+        if is_rust_module(&path) {
+            finish_rust_change(ctx, Some(message), true).await?;
+        }
         Ok(())
     }
 
@@ -420,7 +434,7 @@ impl LoaderMod {
         let name = raw
             .rsplit('/')
             .next()
-            .filter(|part| part.ends_with(".py"))
+            .filter(|part| has_known_extension(part))
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("module-{:08x}.py", rand::thread_rng().gen::<u32>()));
         let path = download_to_modules(ctx, raw, &name).await?;
@@ -430,6 +444,9 @@ impl LoaderMod {
                 &[&escape_html(&display_name(&path))],
             ))
             .await?;
+        if is_rust_module(&path) {
+            finish_rust_change(ctx, Some(message), true).await?;
+        }
         Ok(())
     }
 
@@ -442,32 +459,33 @@ impl LoaderMod {
         let dir = modules_dir(ctx);
         let target = sanitize_file_name(name);
         let path = dir.join(&target);
-        if !path.exists() {
-            if let Some(found) = find_local_module(ctx, name) {
-                std::fs::remove_file(&found)
-                    .with_context(|| format!("failed to remove {}", found.display()))?;
-                message
-                    .reply_html(ctx.tf(
-                        "loader.module_unloaded",
-                        &[&escape_html(&display_name(&found))],
-                    ))
-                    .await?;
-                return Ok(());
-            }
+        let victim = if path.exists() {
+            Some(path)
+        } else {
+            find_local_module(ctx, name)
+        };
+        let Some(victim) = victim else {
             message
                 .reply_html(ctx.tr("loader.module_not_found"))
                 .await?;
             return Ok(());
-        }
+        };
 
-        std::fs::remove_file(&path)
-            .with_context(|| format!("failed to remove {}", path.display()))?;
+        let rust = is_rust_module(&victim);
+        std::fs::remove_file(&victim)
+            .with_context(|| format!("failed to remove {}", victim.display()))?;
+        if rust {
+            remove_repo_module(&victim);
+        }
         message
             .reply_html(ctx.tf(
                 "loader.module_unloaded",
-                &[&escape_html(&display_name(&path))],
+                &[&escape_html(&display_name(&victim))],
             ))
             .await?;
+        if rust {
+            finish_rust_change(ctx, Some(message), true).await?;
+        }
         Ok(())
     }
 
@@ -481,22 +499,31 @@ impl LoaderMod {
             return Ok(());
         }
         let mut installed = 0usize;
+        let mut rust = false;
         for entry in modules {
-            if install_entry(ctx, &repo, &entry).await.is_ok() {
+            if let Ok(path) = install_entry(ctx, &repo, &entry).await {
                 installed += 1;
+                rust |= is_rust_module(&path);
             }
         }
         message
             .reply_html(ctx.tf("loader.installed_all", &[&installed.to_string()]))
             .await?;
+        if rust {
+            finish_rust_change(ctx, Some(message), true).await?;
+        }
         Ok(())
     }
 
     async fn unload_all(&self, ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+        let had_rust = has_rust_modules(ctx);
         let removed = clear_modules(ctx)?;
         message
             .reply_html(ctx.tf("loader.modules_unloaded", &[&removed.to_string()]))
             .await?;
+        if had_rust {
+            finish_rust_change(ctx, Some(message), true).await?;
+        }
         Ok(())
     }
 
@@ -511,10 +538,14 @@ impl LoaderMod {
                 .await?;
             return Ok(());
         }
+        let had_rust = has_rust_modules(ctx);
         let removed = clear_modules(ctx)?;
         message
             .reply_html(ctx.tf("loader.modules_unloaded", &[&removed.to_string()]))
             .await?;
+        if had_rust {
+            finish_rust_change(ctx, Some(message), true).await?;
+        }
         Ok(())
     }
 
@@ -709,7 +740,7 @@ pub fn list_local_modules(ctx: &Arc<Ctx>) -> Vec<PathBuf> {
         .filter(|path| {
             path.extension()
                 .and_then(|ext| ext.to_str())
-                .map(|ext| matches!(ext, "py" | "rhai"))
+                .map(|ext| matches!(ext, "py" | "rhai" | "rs"))
                 .unwrap_or(false)
         })
         .collect();
@@ -898,7 +929,9 @@ pub(crate) async fn handle_inline_callback(
             .send()
             .await;
 
-        let (html, buttons) = match install_entry(ctx, &repo, &entry).await {
+        let installed = install_entry(ctx, &repo, &entry).await;
+        let rust = matches!(&installed, Ok(path) if is_rust_module(path));
+        let (html, buttons) = match installed {
             Ok(path) => (
                 ctx.tf(
                     "loader.module_installed",
@@ -928,6 +961,9 @@ pub(crate) async fn handle_inline_callback(
                     .reply_markup(ReplyMarkup::from_buttons(&buttons)),
             )
             .await;
+        if rust {
+            finish_rust_change(ctx, None, true).await?;
+        }
         return Ok(true);
     }
 
@@ -944,26 +980,37 @@ pub(crate) async fn handle_inline_callback(
                 let entries = fetch_modules(&ctx, &repo).await?;
                 let mut installed = 0usize;
                 let mut failed = 0usize;
+                let mut rust = false;
                 for entry in entries {
-                    if install_entry(&ctx, &repo, &entry).await.is_ok() {
+                    if let Ok(path) = install_entry(&ctx, &repo, &entry).await {
                         installed += 1;
+                        rust |= is_rust_module(&path);
                     } else {
                         failed += 1;
                     }
                 }
-                Ok::<(usize, usize), anyhow::Error>((installed, failed))
+                Ok::<(usize, usize, bool), anyhow::Error>((installed, failed, rust))
             }
             .await;
 
-            let html = match result {
-                Ok((installed, 0)) => ctx.tf("loader.installed_all", &[&installed.to_string()]),
-                Ok((installed, failed)) => ctx.tf(
-                    "loader.installed_partial",
-                    &[&installed.to_string(), &failed.to_string()],
+            let (html, rust) = match result {
+                Ok((installed, 0, rust)) => (
+                    ctx.tf("loader.installed_all", &[&installed.to_string()]),
+                    rust,
                 ),
-                Err(err) => ctx.tf(
-                    "loader.module_install_failed",
-                    &[&escape_html(&format!("{err:#}"))],
+                Ok((installed, failed, rust)) => (
+                    ctx.tf(
+                        "loader.installed_partial",
+                        &[&installed.to_string(), &failed.to_string()],
+                    ),
+                    rust,
+                ),
+                Err(err) => (
+                    ctx.tf(
+                        "loader.module_install_failed",
+                        &[&escape_html(&format!("{err:#}"))],
+                    ),
+                    false,
                 ),
             };
             let _ = ctx
@@ -978,6 +1025,9 @@ pub(crate) async fn handle_inline_callback(
                     ]],
                 )
                 .await;
+            if rust {
+                let _ = finish_rust_change(&ctx, None, true).await;
+            }
         });
         return Ok(true);
     }
@@ -998,7 +1048,7 @@ pub(crate) async fn handle_inline_callback(
             .await;
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let html = install_repo_all(&ctx, &repo).await;
+            let (html, rust) = install_repo_all(&ctx, &repo).await;
             let _ = ctx
                 .inline
                 .send_to_user(
@@ -1011,6 +1061,9 @@ pub(crate) async fn handle_inline_callback(
                     ]],
                 )
                 .await;
+            if rust {
+                let _ = finish_rust_change(&ctx, None, true).await;
+            }
         });
         return Ok(true);
     }
@@ -1036,6 +1089,7 @@ pub(crate) async fn handle_inline_callback(
     }
 
     if data == "heroku:mod:clear!" {
+        let had_rust = has_rust_modules(ctx);
         let html = match clear_modules(ctx) {
             Ok(removed) => ctx.tf("loader.modules_unloaded", &[&removed.to_string()]),
             Err(err) => ctx.tf(
@@ -1055,31 +1109,41 @@ pub(crate) async fn handle_inline_callback(
                     .reply_markup(ReplyMarkup::from_buttons(&buttons)),
             )
             .await;
+        if had_rust {
+            finish_rust_change(ctx, None, true).await?;
+        }
         return Ok(true);
     }
 
     Ok(false)
 }
 
-async fn install_repo_all(ctx: &Arc<Ctx>, repo: &str) -> String {
+async fn install_repo_all(ctx: &Arc<Ctx>, repo: &str) -> (String, bool) {
     let entries = match fetch_modules(ctx, repo).await {
         Ok(entries) => entries,
         Err(err) => {
-            return ctx.tf(
-                "loader.module_install_failed",
-                &[&escape_html(&format!("{err:#}"))],
+            return (
+                ctx.tf(
+                    "loader.module_install_failed",
+                    &[&escape_html(&format!("{err:#}"))],
+                ),
+                false,
             )
         }
     };
     if entries.is_empty() {
-        return ctx.tr("loader.no_modules_in_repo");
+        return (ctx.tr("loader.no_modules_in_repo"), false);
     }
 
     let mut installed = 0usize;
+    let mut rust = false;
     let mut failed = Vec::new();
     for entry in entries {
         match install_entry(ctx, repo, &entry).await {
-            Ok(_) => installed += 1,
+            Ok(path) => {
+                installed += 1;
+                rust |= is_rust_module(&path);
+            }
             Err(err) => failed.push(format!(
                 "▫️ <code>{}</code> — {}",
                 escape_html(&entry),
@@ -1088,7 +1152,7 @@ async fn install_repo_all(ctx: &Arc<Ctx>, repo: &str) -> String {
         }
     }
 
-    if failed.is_empty() {
+    let html = if failed.is_empty() {
         ctx.tf("loader.installed_all", &[&installed.to_string()])
     } else {
         let mut text = ctx.tf(
@@ -1098,11 +1162,18 @@ async fn install_repo_all(ctx: &Arc<Ctx>, repo: &str) -> String {
         text.push('\n');
         text.push_str(&failed.join("\n"));
         text
-    }
+    };
+    (html, rust)
 }
 
 fn module_stem(entry: &str) -> String {
-    entry_name(entry).trim_end_matches(".py").to_owned()
+    let name = entry_name(entry);
+    for ext in [".py", ".rhai", ".rs"] {
+        if let Some(stem) = name.strip_suffix(ext) {
+            return stem.to_owned();
+        }
+    }
+    name
 }
 
 fn repo_host(repo: &str) -> String {
@@ -1239,9 +1310,15 @@ async fn fetch_modules(ctx: &Arc<Ctx>, repo: &str) -> Result<Vec<String>> {
     Ok(list)
 }
 
+fn has_known_extension(name: &str) -> bool {
+    [".py", ".rhai", ".rs"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
 fn entry_name(entry: &str) -> String {
     let base = entry.rsplit('/').next().unwrap_or(entry).trim();
-    if base.ends_with(".py") {
+    if has_known_extension(base) {
         base.to_owned()
     } else {
         format!("{base}.py")
@@ -1251,7 +1328,7 @@ fn entry_name(entry: &str) -> String {
 fn module_url(repo: &str, entry: &str) -> String {
     let trimmed = repo.trim_end_matches('/');
     let entry = entry.trim_start_matches('/');
-    if entry.ends_with(".py") {
+    if has_known_extension(entry) {
         format!("{trimmed}/{entry}")
     } else {
         format!("{trimmed}/{entry}.py")
@@ -1311,6 +1388,9 @@ async fn download_to_modules(ctx: &Arc<Ctx>, url: &str, file_name: &str) -> Resu
 
     let path = dir.join(sanitize_file_name(file_name));
     crate::config::write_private(&path, &bytes)?;
+    if is_rust_module(&path) {
+        mirror_repo_module(&path)?;
+    }
     Ok(path)
 }
 
@@ -1341,7 +1421,7 @@ fn sanitize_file_name(name: &str) -> String {
     if file.is_empty() {
         file = format!("module-{:08x}", rand::thread_rng().gen::<u32>());
     }
-    if !file.ends_with(".py") && !file.ends_with(".rhai") {
+    if !has_known_extension(&file) {
         file.push_str(".py");
     }
     file
@@ -1363,6 +1443,7 @@ fn find_local_module(ctx: &Arc<Ctx>, name: &str) -> Option<PathBuf> {
         display_name(path)
             .trim_end_matches(".py")
             .trim_end_matches(".rhai")
+            .trim_end_matches(".rs")
             .to_lowercase()
             == stem
     })
@@ -1377,6 +1458,112 @@ fn clear_modules(ctx: &Arc<Ctx>) -> Result<usize> {
         }
     }
     Ok(removed)
+}
+
+fn is_rust_module(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+}
+
+pub(crate) fn has_rust_modules(ctx: &Arc<Ctx>) -> bool {
+    list_local_modules(ctx)
+        .iter()
+        .any(|path| is_rust_module(path))
+}
+
+fn repo_modules_dir() -> Option<PathBuf> {
+    crate::modules::updater::repo_root().map(|root| root.join("modules"))
+}
+
+/// External Rust modules must live inside the repository so `build.rs` can see
+/// them when the release is rebuilt.
+fn mirror_repo_module(path: &Path) -> Result<()> {
+    let Some(dir) = repo_modules_dir() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    let dest = dir.join(name);
+    if dest != path {
+        std::fs::copy(path, &dest)
+            .with_context(|| format!("failed to copy module to {}", dest.display()))?;
+    }
+    Ok(())
+}
+
+fn remove_repo_module(path: &Path) {
+    let Some(dir) = repo_modules_dir() else {
+        return;
+    };
+    if let Some(name) = path.file_name() {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+}
+
+fn clear_repo_modules() {
+    let Some(dir) = repo_modules_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_rust_module(&path) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Rebuild the release after adding or removing Rust modules and restart so
+/// the freshly compiled registry is loaded.
+pub(crate) async fn finish_rust_change(
+    ctx: &Arc<Ctx>,
+    message: Option<&Msg>,
+    force: bool,
+) -> Result<()> {
+    if !force && !has_rust_modules(ctx) {
+        return Ok(());
+    }
+    let Some(root) = crate::modules::updater::repo_root() else {
+        notify_rust(ctx, message, ctx.tr("loader.rust_no_repo")).await?;
+        return Ok(());
+    };
+    // Keep the repository copies in sync before building.
+    if has_rust_modules(ctx) {
+        for path in list_local_modules(ctx) {
+            if is_rust_module(&path) {
+                let _ = mirror_repo_module(&path);
+            }
+        }
+    } else {
+        clear_repo_modules();
+    }
+    notify_rust(ctx, message, ctx.tr("loader.rust_building")).await?;
+    match crate::modules::updater::build_release(&root).await {
+        Ok(()) => {
+            notify_rust(ctx, message, ctx.tr("loader.rust_built")).await?;
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                if let Err(err) = crate::inline::restart_process() {
+                    tracing::error!("Restart after building Rust modules failed: {err}");
+                }
+            });
+        }
+        Err(err) => {
+            let html = ctx.tf("loader.rust_failed", &[&escape_html(&format!("{err:#}"))]);
+            notify_rust(ctx, message, html).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn notify_rust(ctx: &Arc<Ctx>, message: Option<&Msg>, html: String) -> Result<()> {
+    match message {
+        Some(message) => message.reply_html(html).await.map(|_| ()),
+        None => ctx.send_self(html).await,
+    }
 }
 
 inventory::submit! {

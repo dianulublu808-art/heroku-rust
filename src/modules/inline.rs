@@ -173,7 +173,8 @@ impl InlineStuff {
             return Ok(());
         }
 
-        let token_re = Regex::new(r"^[0-9]{6,12}:[A-Za-z0-9_-]{20,}$").expect("valid token regex");
+        let token_re =
+            Regex::new(r"^[0-9]{8,10}:[A-Za-z0-9_-]{34,36}$").expect("valid token regex");
         if !token_re.is_match(token) {
             message.reply_html(ctx.tr("inline.token_invalid")).await?;
             return Ok(());

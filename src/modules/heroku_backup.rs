@@ -346,7 +346,7 @@ impl HerokuBackupMod {
         message
             .reply_html(ctx.tf("backup.mods_restored", &[&restored.to_string()]))
             .await?;
-        schedule_restart();
+        restart_or_rebuild(ctx, message).await?;
         Ok(())
     }
 
@@ -409,9 +409,7 @@ impl HerokuBackupMod {
                     ],
                 ))
                 .await?;
-            if outcome.database {
-                schedule_restart();
-            }
+            restart_or_rebuild(ctx, message).await?;
             return Ok(());
         }
 
@@ -441,11 +439,23 @@ impl HerokuBackupMod {
             message
                 .reply_html(ctx.tf("backup.mods_restored", &[&restored.to_string()]))
                 .await?;
+            restart_or_rebuild(ctx, message).await?;
             return Ok(());
         }
 
         ctx.db.restore(sanitize_db(value));
         message.reply_html(ctx.tr("backup.restored")).await?;
+        restart_or_rebuild(ctx, message).await?;
+        Ok(())
+    }
+}
+
+/// Restore is a two-step process: `.rs` modules are compiled before restart,
+/// everything else restarts immediately.
+async fn restart_or_rebuild(ctx: &Arc<Ctx>, message: &Msg) -> Result<()> {
+    if crate::modules::loader::has_rust_modules(ctx) {
+        crate::modules::loader::finish_rust_change(ctx, Some(message), false).await
+    } else {
         schedule_restart();
         Ok(())
     }
@@ -800,8 +810,9 @@ pub(crate) async fn handle_restore_callback(
                 .text(ctx.tr("backup.all_restored_bot"))
                 .send()
                 .await;
-            if outcome.database {
-                schedule_restart();
+            if outcome.database || outcome.modules > 0 {
+                let message = Msg::new(message);
+                restart_or_rebuild(ctx, &message).await?;
             }
         }
         _ => {

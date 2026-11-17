@@ -572,7 +572,7 @@ async fn apply_update(ctx: &Arc<Ctx>, root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn build_release(root: &Path) -> Result<()> {
+pub(crate) async fn build_release(root: &Path) -> Result<()> {
     let output = tokio::time::timeout(
         BUILD_TIMEOUT,
         tokio::process::Command::new("cargo")
