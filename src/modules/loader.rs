@@ -432,6 +432,9 @@ impl LoaderMod {
 
         message.reply_html(ctx.tr("loader.loading_module")).await?;
         let name = raw
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(raw)
             .rsplit('/')
             .next()
             .filter(|part| has_known_extension(part))
@@ -1572,4 +1575,26 @@ inventory::submit! {
 
 inventory::submit! {
     ModuleFactory(|| Box::new(LoaderRestrictor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_modules_keep_their_extension() {
+        assert_eq!(entry_name("ExampleMod.rs"), "ExampleMod.rs");
+        assert_eq!(entry_name("repos/ExampleMod.rs"), "ExampleMod.rs");
+        assert_eq!(entry_name("ExampleMod.py"), "ExampleMod.py");
+        assert_eq!(entry_name("ExampleMod"), "ExampleMod.py");
+        assert_eq!(sanitize_file_name("ExampleMod.rs"), "ExampleMod.rs");
+    }
+
+    #[test]
+    fn stems_drop_known_extensions() {
+        assert_eq!(module_stem("Foo.rs"), "Foo");
+        assert_eq!(module_stem("Foo.rhai"), "Foo");
+        assert_eq!(module_stem("Foo.py"), "Foo");
+        assert_eq!(module_stem("Foo"), "Foo");
+    }
 }
