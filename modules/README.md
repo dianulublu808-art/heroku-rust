@@ -136,8 +136,10 @@ async fn on_watcher(
 `only_pm`, `no_pm`, `no_channels`, `no_groups`, `no_forwards`,
 `only_forwards`, `no_reply`, `only_reply`, `mention`, `no_mention`,
 `startswith`, `endswith`, `contains`, `regex`, `from_id` and `chat_id`.
-The field name is `no_commands` (the legacy `has_watcher()` +
-`on_message()` API is still supported, but it never receives edits).
+`only_docs` and `no_docs` both treat videos and audio files as documents,
+because that is how Telegram stores them. The field name is `no_commands` (the
+legacy `has_watcher()` + `on_message()` API is still supported, but it never
+receives edits).
 
 ## Lifecycle, dependencies and errors
 

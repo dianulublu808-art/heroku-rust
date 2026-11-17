@@ -172,6 +172,16 @@ impl InlineManager {
         }
     }
 
+    /// Record a callback query and return `true` when it was already handled
+    /// recently. Returns `false` if the state lock is unavailable, so a broken
+    /// lock never swallows a user action.
+    pub(crate) fn suppress_callback(&self, sender: i64, query_id: i64) -> bool {
+        self.callbacks
+            .lock()
+            .map(|mut seen| seen.is_duplicate((sender, query_id), Instant::now()))
+            .unwrap_or(false)
+    }
+
     /// Token stored in the database, falling back to the config/env value.
     pub fn stored_token(ctx: &Ctx) -> Option<String> {
         let from_db = ctx.db.get_str(INLINE_NS, "bot_token", "");
@@ -1772,12 +1782,7 @@ impl InlineManager {
         // repeats before any side effect happens, but still acknowledge them so
         // the client does not keep a spinning button.
         if let Some(query_id) = callback_query_id(call) {
-            let duplicate = self
-                .callbacks
-                .lock()
-                .map(|mut seen| seen.is_duplicate((sender, query_id), Instant::now()))
-                .unwrap_or(false);
-            if duplicate {
+            if self.suppress_callback(sender, query_id) {
                 debug!("Ignoring duplicate callback query {query_id} from {sender}");
                 let _ = call.answer().send().await;
                 return Ok(());
@@ -2866,7 +2871,34 @@ pub(crate) fn restart_process() -> std::io::Result<()> {
 mod tests {
     use std::time::Duration;
 
-    use super::{CallbackDedup, CALLBACK_DEDUP_CAPACITY, CALLBACK_DEDUP_TTL};
+    use super::{
+        CallbackDedup, InlineManager, PendingInput, CALLBACK_DEDUP_CAPACITY, CALLBACK_DEDUP_TTL,
+    };
+
+    #[test]
+    fn manager_suppresses_duplicate_callbacks_per_sender() {
+        let manager = InlineManager::new();
+        assert!(!manager.suppress_callback(1, 10));
+        assert!(manager.suppress_callback(1, 10));
+        assert!(!manager.suppress_callback(2, 10));
+        assert!(!manager.suppress_callback(1, 11));
+    }
+
+    #[test]
+    fn pending_input_is_scoped_per_user_and_consumed_once() {
+        let manager = InlineManager::new();
+        manager.set_pending(1, PendingInput::AccountCode);
+        manager.set_pending(2, PendingInput::OwnerAdd);
+
+        assert_eq!(manager.take_pending(2), Some(PendingInput::OwnerAdd));
+        assert_eq!(manager.take_pending(2), None);
+        assert_eq!(manager.take_pending(1), Some(PendingInput::AccountCode));
+
+        manager.set_pending(1, PendingInput::AccountPhone);
+        manager.clear_pending(1);
+        assert_eq!(manager.take_pending(1), None);
+        assert_eq!(manager.take_pending(3), None);
+    }
 
     #[test]
     fn repeated_callback_ids_are_deduplicated() {

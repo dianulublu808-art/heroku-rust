@@ -30,12 +30,24 @@ pub struct Database {
     /// Serializes snapshots and disk writes so two concurrent saves cannot
     /// interleave and publish an older snapshot over a newer one.
     save_lock: Mutex<()>,
+    /// Set when the file was written by a newer schema. Older binaries must not
+    /// rewrite it: they do not know the new layout and could drop keys.
+    read_only: bool,
+    read_only_warned: AtomicBool,
+}
+
+fn stored_schema(map: &Map<String, Value>) -> Option<u64> {
+    map.get(META_OWNER)
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get(SCHEMA_KEY))
+        .and_then(Value::as_u64)
 }
 
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut map = Map::new();
+        let mut newer_schema = false;
         if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read database {}", path.display()))?;
@@ -71,11 +83,16 @@ impl Database {
                     }
                 }
 
+                // A newer build owns this file. Do not migrate, rewrite or
+                // create snapshots of a layout this build does not understand.
+                newer_schema = stored_schema(&map).is_some_and(|version| version > SCHEMA_VERSION);
+
                 // Keep an untouched copy of the original file before rewriting
                 // it, so a migration bug can never destroy user settings.
-                if map
-                    .keys()
-                    .any(|key| key.starts_with("hikka.") || key.starts_with("legacy."))
+                if !newer_schema
+                    && map
+                        .keys()
+                        .any(|key| key.starts_with("hikka.") || key.starts_with("legacy."))
                 {
                     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
                     let backup = path.with_file_name(format!(
@@ -102,7 +119,10 @@ impl Database {
         // Migrate old Hikka/GeekTG namespaces, exactly like the Python version did.
         // If both the old and the new namespace exist, merge their keys instead of
         // letting the last migration overwrite the earlier one.
-        for (old, new) in [("hikka.", "heroku."), ("legacy.", "heroku.")] {
+        for (old, new) in [("hikka.", "heroku."), ("legacy.", "heroku.")]
+            .into_iter()
+            .filter(|_| !newer_schema)
+        {
             let keys: Vec<String> = map
                 .keys()
                 .filter(|key| key.starts_with(old))
@@ -127,30 +147,27 @@ impl Database {
             }
         }
 
-        let stored_schema = map
-            .get(META_OWNER)
-            .and_then(Value::as_object)
-            .and_then(|meta| meta.get(SCHEMA_KEY))
-            .and_then(Value::as_u64);
-        match stored_schema {
-            Some(version) if version > SCHEMA_VERSION => {
-                // A newer build wrote this database. Keep the file intact: an
-                // older binary must not silently downgrade or drop new keys.
-                tracing::warn!(
-                    "Database schema v{version} is newer than this build (v{SCHEMA_VERSION}); \
-                     refusing to downgrade it"
-                );
-            }
-            Some(version) if version < SCHEMA_VERSION => {
-                tracing::info!("Migrating database schema v{version} → v{SCHEMA_VERSION}");
-                migrate_schema(&mut map, version);
-                set_schema(&mut map);
-                needs_save = true;
-            }
-            Some(_) => {}
-            None => {
-                set_schema(&mut map);
-                needs_save = true;
+        if newer_schema {
+            let version = stored_schema(&map).unwrap_or_default();
+            // A newer build wrote this database. Keep the file intact: an
+            // older binary must not silently downgrade or drop new keys.
+            tracing::warn!(
+                "Database schema v{version} is newer than this build (v{SCHEMA_VERSION}); \
+                 opening it read-only"
+            );
+        } else {
+            match stored_schema(&map) {
+                Some(version) if version < SCHEMA_VERSION => {
+                    tracing::info!("Migrating database schema v{version} → v{SCHEMA_VERSION}");
+                    migrate_schema(&mut map, version);
+                    set_schema(&mut map);
+                    needs_save = true;
+                }
+                Some(_) => {}
+                None => {
+                    set_schema(&mut map);
+                    needs_save = true;
+                }
             }
         }
 
@@ -159,8 +176,10 @@ impl Database {
             data: RwLock::new(map),
             dirty: AtomicBool::new(false),
             save_lock: Mutex::new(()),
+            read_only: newer_schema,
+            read_only_warned: AtomicBool::new(false),
         };
-        if needs_save {
+        if needs_save && !database.read_only {
             // Persist namespace/schema migrations immediately; otherwise they
             // would only reach disk after an unrelated setting is changed.
             database.save();
@@ -170,6 +189,25 @@ impl Database {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether this build may write the database. A file with a newer schema
+    /// is deliberately read-only so an older binary cannot downgrade it.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn writable(&self) -> bool {
+        if !self.read_only {
+            return true;
+        }
+        if !self.read_only_warned.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                "Database {} was written by a newer build; refusing writes to protect it",
+                self.path.display()
+            );
+        }
+        false
     }
 
     pub fn get_value(&self, owner: &str, key: &str) -> Option<Value> {
@@ -236,6 +274,9 @@ impl Database {
     }
 
     pub fn set_value(&self, owner: &str, key: &str, value: Value) -> bool {
+        if !self.writable() {
+            return false;
+        }
         {
             let Ok(mut data) = self.data.write() else {
                 return false;
@@ -259,6 +300,9 @@ impl Database {
     }
 
     pub fn set_owner(&self, owner: &str, value: Map<String, Value>) -> bool {
+        if !self.writable() {
+            return false;
+        }
         {
             let Ok(mut data) = self.data.write() else {
                 return false;
@@ -269,6 +313,9 @@ impl Database {
     }
 
     pub fn remove(&self, owner: &str, key: &str) -> bool {
+        if !self.writable() {
+            return false;
+        }
         {
             let Ok(mut data) = self.data.write() else {
                 return false;
@@ -281,6 +328,9 @@ impl Database {
     }
 
     pub fn clear_owner(&self, owner: &str) -> bool {
+        if !self.writable() {
+            return false;
+        }
         {
             let Ok(mut data) = self.data.write() else {
                 return false;
@@ -302,6 +352,9 @@ impl Database {
     }
 
     pub fn restore(&self, value: Value) -> bool {
+        if !self.writable() {
+            return false;
+        }
         let Value::Object(object) = value else {
             return false;
         };
@@ -312,6 +365,9 @@ impl Database {
     }
 
     pub fn save(&self) -> bool {
+        if !self.writable() {
+            return false;
+        }
         let _guard = self
             .save_lock
             .lock()
@@ -472,6 +528,11 @@ mod tests {
         let db = Database::open(&path).expect("open");
         assert_eq!(db.get_i64("missing", "key", 3), 3);
 
+        // The replacement database must be usable and carry the schema.
+        assert!(db.set("heroku.main", "prefix", "!"));
+        assert_eq!(db.get_str("heroku.main", "prefix", ""), "!");
+        assert_eq!(db.get_i64(META_OWNER, SCHEMA_KEY, 0), SCHEMA_VERSION as i64);
+
         let prefix = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -484,6 +545,12 @@ mod tests {
             .filter(|name| name.starts_with(&format!("{prefix}.corrupt-")))
             .collect();
         assert_eq!(preserved.len(), 1, "corrupted database must be kept");
+        let preserved_path = std::env::temp_dir().join(&preserved[0]);
+        assert_eq!(
+            std::fs::read_to_string(&preserved_path).expect("read preserved file"),
+            "{ definitely not json",
+            "the preserved file must be an exact copy of the original"
+        );
 
         for name in preserved {
             let _ = std::fs::remove_file(std::env::temp_dir().join(name));
@@ -528,20 +595,73 @@ mod tests {
     }
 
     #[test]
-    fn does_not_downgrade_a_newer_schema() {
+    fn upgrades_an_older_schema_and_keeps_unknown_keys() {
         let path = std::env::temp_dir().join(format!(
-            "heroku-db-future-{}-{}.json",
+            "heroku-db-old-{}-{}.json",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
         std::fs::write(
             &path,
-            r#"{"heroku.meta":{"schema":999},"heroku.main":{"prefix":"."}}"#,
+            r#"{"heroku.meta":{"schema":0},"heroku.main":{"prefix":"?","future":42}}"#,
         )
         .expect("write fixture");
         let db = Database::open(&path).expect("open database");
+        assert!(!db.is_read_only());
+        assert_eq!(db.get_i64(META_OWNER, SCHEMA_KEY, 0), SCHEMA_VERSION as i64);
+        assert_eq!(db.get_str("heroku.main", "prefix", ""), "?");
+        assert_eq!(db.get_i64("heroku.main", "future", 0), 42);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn does_not_downgrade_or_rewrite_a_newer_schema() {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-db-future-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let fixture = r#"{"heroku.meta":{"schema":999,"future_key":true},"heroku.main":{"prefix":"."},"hikka.main":{"legacy":1}}"#;
+        std::fs::write(&path, fixture).expect("write fixture");
+
+        let db = Database::open(&path).expect("open database");
+        assert!(db.is_read_only());
         assert_eq!(db.get_i64(META_OWNER, SCHEMA_KEY, 0), 999);
         assert_eq!(db.get_str("heroku.main", "prefix", ""), ".");
+
+        // Every mutator must refuse to change either memory or disk.
+        assert!(!db.set("heroku.main", "prefix", "!"));
+        assert!(!db.set_value("heroku.main", "new", Value::from(1)));
+        assert!(!db.remove("heroku.main", "prefix"));
+        assert!(!db.clear_owner("heroku.main"));
+        assert!(!db.restore(Value::Object(Map::new())));
+        assert_eq!(db.get_str("heroku.main", "prefix", ""), ".");
+        // Legacy namespaces are not migrated in a newer, unknown layout.
+        assert_eq!(db.get_i64("hikka.main", "legacy", 0), 1);
+        assert_eq!(db.get_i64("heroku.main", "legacy", 0), 0);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read database"),
+            fixture,
+            "a newer database must stay byte-for-byte intact"
+        );
+
+        // No legacy migration and no pre-migration snapshot for a newer file.
+        let prefix = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .to_owned();
+        let snapshots = std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{prefix}.pre-migration-"))
+            })
+            .count();
+        assert_eq!(snapshots, 0);
         let _ = std::fs::remove_file(path);
     }
 

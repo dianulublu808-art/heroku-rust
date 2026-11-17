@@ -5,10 +5,12 @@
 //! plugin discovery.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde_json::Value;
 
 use crate::args::Args;
@@ -232,6 +234,39 @@ pub struct WatcherFilter {
     pub chat_id: Option<i64>,
 }
 
+/// Upper bound for the watcher regex cache. Modules call `watchers()` on every
+/// update, so compiling the same pattern per message would be wasteful.
+const REGEX_CACHE_LIMIT: usize = 256;
+
+static WATCHER_REGEX_CACHE: Lazy<Mutex<HashMap<String, Option<Regex>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Return a compiled watcher regex, reusing the previous compilation.
+///
+/// `None` is cached for invalid patterns too, so a broken module cannot make
+/// the dispatcher retry (and log) compilation on every message. A poisoned
+/// lock falls back to direct compilation instead of panicking.
+fn cached_regex(pattern: &str) -> Option<Regex> {
+    match WATCHER_REGEX_CACHE.lock() {
+        Ok(mut cache) => {
+            if let Some(compiled) = cache.get(pattern) {
+                return compiled.clone();
+            }
+            let compiled = Regex::new(pattern).ok();
+            if cache.len() >= REGEX_CACHE_LIMIT {
+                // Evict one arbitrary entry instead of clearing the whole
+                // cache, so a module with many patterns does not thrash it.
+                if let Some(oldest) = cache.keys().next().cloned() {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(pattern.to_owned(), compiled.clone());
+            compiled
+        }
+        Err(_) => Regex::new(pattern).ok(),
+    }
+}
+
 impl WatcherFilter {
     /// Text-only part of the filter. Exposed for unit tests and for modules
     /// that already have a message-like value.
@@ -252,10 +287,7 @@ impl WatcherFilter {
             }
         }
         if let Some(pattern) = &self.regex {
-            if !regex::Regex::new(pattern)
-                .map(|regex| regex.is_match(text))
-                .unwrap_or(false)
-            {
+            if !cached_regex(pattern).is_some_and(|regex| regex.is_match(text)) {
                 return false;
             }
         }
@@ -310,7 +342,14 @@ impl WatcherFilter {
         if self.no_stickers && media == MediaKind::Sticker {
             return false;
         }
-        if self.no_docs && media == MediaKind::Document {
+        // Mirror `only_docs`: Telegram stores videos and audio files as
+        // documents, so `no_docs` excludes the same set.
+        if self.no_docs
+            && matches!(
+                media,
+                MediaKind::Document | MediaKind::Video | MediaKind::Audio
+            )
+        {
             return false;
         }
         true
@@ -569,7 +608,11 @@ pub(crate) fn order_by_dependencies(mut modules: Vec<Arc<dyn Module>>) -> Vec<Ar
             }
         }
         if !progressed {
-            tracing::warn!("Circular module dependencies; loading the rest by name");
+            let stuck: Vec<&str> = pending.iter().map(|module| module.name()).collect();
+            tracing::warn!(
+                modules = ?stuck,
+                "Circular module dependencies; loading the rest by name"
+            );
             ordered.append(&mut pending);
         }
     }
@@ -744,6 +787,29 @@ mod tests {
     }
 
     #[test]
+    fn watcher_regex_cache_is_bounded_and_reuses_compiled_patterns() {
+        let pattern = "^cache-[0-9]+$";
+        for _ in 0..5 {
+            let regex = cached_regex(pattern).expect("valid regex");
+            assert!(regex.is_match("cache-42"));
+        }
+        assert!(cached_regex("(").is_none());
+        assert!(cached_regex("(").is_none());
+
+        for index in 0..(REGEX_CACHE_LIMIT + 50) {
+            assert!(cached_regex(&format!("^bounded-{index}$")).is_some());
+        }
+        let len = WATCHER_REGEX_CACHE
+            .lock()
+            .map(|cache| cache.len())
+            .unwrap_or_default();
+        assert!(
+            len <= REGEX_CACHE_LIMIT,
+            "regex cache grew past its limit: {len}"
+        );
+    }
+
+    #[test]
     fn watcher_media_filters_include_and_exclude() {
         use crate::tg::MediaKind;
 
@@ -771,6 +837,32 @@ mod tests {
         assert!(!no_photos.matches_media(MediaKind::Photo));
         assert!(no_photos.matches_media(MediaKind::Video));
         assert!(no_photos.matches_media(MediaKind::None));
+
+        let no_docs = WatcherFilter {
+            no_docs: true,
+            ..Default::default()
+        };
+        assert!(!no_docs.matches_media(MediaKind::Document));
+        assert!(!no_docs.matches_media(MediaKind::Video));
+        assert!(!no_docs.matches_media(MediaKind::Audio));
+        assert!(no_docs.matches_media(MediaKind::Photo));
+        assert!(no_docs.matches_media(MediaKind::Sticker));
+        assert!(no_docs.matches_media(MediaKind::None));
+
+        // `only_docs` and `no_docs` describe the same document set.
+        let contradictory = WatcherFilter {
+            only_docs: true,
+            no_docs: true,
+            ..Default::default()
+        };
+        for media in [
+            MediaKind::Document,
+            MediaKind::Video,
+            MediaKind::Audio,
+            MediaKind::Photo,
+        ] {
+            assert!(!contradictory.matches_media(media));
+        }
 
         let text_only = WatcherFilter {
             no_media: true,
@@ -840,5 +932,100 @@ mod tests {
         assert!(position("Base") < position("ChildMod"));
         assert!(position("ChildMod") < position("AlsoMod"));
         assert!(names.contains(&"MissingDepMod"));
+    }
+
+    struct WatcherModule {
+        legacy: bool,
+        filtered: bool,
+    }
+
+    #[async_trait]
+    impl Module for WatcherModule {
+        fn name(&self) -> &'static str {
+            "WatcherModule"
+        }
+
+        fn has_watcher(&self) -> bool {
+            self.legacy
+        }
+
+        fn watchers(&self) -> Vec<WatcherDef> {
+            if self.filtered {
+                vec![WatcherDef::new("test", WatcherFilter::default())]
+            } else {
+                Vec::new()
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &Arc<Ctx>,
+            _command: &str,
+            _message: &Msg,
+            _args: &Args,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn watcher_introspection_covers_legacy_and_filtered_apis() {
+        let none = WatcherModule {
+            legacy: false,
+            filtered: false,
+        };
+        let legacy = WatcherModule {
+            legacy: true,
+            filtered: false,
+        };
+        let filtered = WatcherModule {
+            legacy: false,
+            filtered: true,
+        };
+        assert!(!none.has_any_watcher());
+        assert!(legacy.has_any_watcher());
+        assert!(filtered.has_any_watcher());
+        assert_eq!(none.api_version(), MODULE_API_VERSION);
+    }
+
+    #[test]
+    fn cycles_keep_every_module_and_fall_back_to_name_order() {
+        let modules: Vec<Arc<dyn Module>> = vec![
+            Arc::new(Dummy {
+                name: "AlphaMod",
+                deps: &["Beta"],
+            }),
+            Arc::new(Dummy {
+                name: "BetaMod",
+                deps: &["Alpha"],
+            }),
+            Arc::new(Dummy {
+                name: "IndependentMod",
+                deps: &[],
+            }),
+        ];
+        let ordered = order_by_dependencies(modules);
+        let names: Vec<&str> = ordered.iter().map(|module| module.name()).collect();
+
+        // No module is dropped, and the independent module is still loaded
+        // before the cycle fallback appends the rest.
+        assert_eq!(names, vec!["IndependentMod", "AlphaMod", "BetaMod"]);
+    }
+
+    #[test]
+    fn a_self_dependency_does_not_drop_the_module() {
+        let modules: Vec<Arc<dyn Module>> = vec![
+            Arc::new(Dummy {
+                name: "SelfMod",
+                deps: &["SelfMod"],
+            }),
+            Arc::new(Dummy {
+                name: "OtherMod",
+                deps: &[],
+            }),
+        ];
+        let ordered = order_by_dependencies(modules);
+        let names: Vec<&str> = ordered.iter().map(|module| module.name()).collect();
+        assert_eq!(names, vec!["OtherMod", "SelfMod"]);
     }
 }

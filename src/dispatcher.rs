@@ -45,6 +45,39 @@ struct Prepared {
     command: CommandDef,
 }
 
+/// Whether a chat is excluded by the global blacklist or a non-empty
+/// whitelist. Both full supergroup ids (`-100…`) and the bare form used by the
+/// Python database are accepted, as numbers or strings.
+pub(crate) fn chat_is_blocked(
+    chat_id: i64,
+    blacklist: Option<&Value>,
+    whitelist: Option<&Value>,
+) -> bool {
+    let bare_id = crate::modules::common::blacklist_chat_id(chat_id);
+    let array_contains = |items: &[Value]| {
+        items.iter().any(|item| {
+            item.as_i64() == Some(chat_id)
+                || item.as_i64() == Some(bare_id)
+                || item.as_str() == Some(&chat_id.to_string())
+                || item.as_str() == Some(&bare_id.to_string())
+        })
+    };
+    let value_contains = |value: &Value| match value {
+        Value::Array(items) => array_contains(items),
+        _ => false,
+    };
+
+    if blacklist.is_some_and(value_contains) {
+        return true;
+    }
+    if let Some(Value::Array(items)) = whitelist {
+        if !items.is_empty() && !array_contains(items) {
+            return true;
+        }
+    }
+    false
+}
+
 impl Dispatcher {
     pub fn new(ctx: &Ctx) -> Self {
         let max_user = ctx.db.get_i64(RATELIMIT_NS, "ratelimit_max_user", 30);
@@ -174,30 +207,11 @@ impl Dispatcher {
     }
 
     fn chat_blocked(&self, ctx: &Ctx, message: &Msg) -> bool {
-        let chat_id = message.chat_id();
-        let bare_id = crate::modules::common::blacklist_chat_id(chat_id);
-        let blacklist = ctx.db.get_value("heroku.main", "blacklist_chats");
-        let whitelist = ctx.db.get_value("heroku.main", "whitelist_chats");
-        let contains_id = |value: &Value| -> bool {
-            match value {
-                Value::Array(items) => items.iter().any(|item| {
-                    item.as_i64() == Some(chat_id)
-                        || item.as_i64() == Some(bare_id)
-                        || item.as_str() == Some(&chat_id.to_string())
-                        || item.as_str() == Some(&bare_id.to_string())
-                }),
-                _ => false,
-            }
-        };
-        if blacklist.as_ref().is_some_and(contains_id) {
-            return true;
-        }
-        if let Some(Value::Array(items)) = whitelist {
-            if !items.is_empty() && !contains_id(&Value::Array(items)) {
-                return true;
-            }
-        }
-        false
+        chat_is_blocked(
+            message.chat_id(),
+            ctx.db.get_value("heroku.main", "blacklist_chats").as_ref(),
+            ctx.db.get_value("heroku.main", "whitelist_chats").as_ref(),
+        )
     }
 
     fn module_blocked(&self, ctx: &Ctx, message: &Msg, module: &str) -> bool {
@@ -714,7 +728,43 @@ pub fn censor(text: &str) -> String {
 
 #[cfg(test)]
 mod grep_tests {
-    use super::extract_grep;
+    use super::{chat_is_blocked, extract_grep};
+    use serde_json::json;
+
+    #[test]
+    fn chat_blocklist_accepts_full_bare_and_string_ids() {
+        let full = -1_000_123_456_789i64;
+        let bare = -123_456_789i64;
+        assert!(!chat_is_blocked(full, None, None));
+        assert!(chat_is_blocked(full, Some(&json!([full])), None));
+        assert!(chat_is_blocked(full, Some(&json!([bare])), None));
+        assert!(chat_is_blocked(
+            full,
+            Some(&json!([full.to_string()])),
+            None
+        ));
+        assert!(!chat_is_blocked(full, Some(&json!([-42])), None));
+    }
+
+    #[test]
+    fn non_empty_whitelist_blocks_other_chats() {
+        let chat = -1_000_123_456_789i64;
+        let list = json!([chat]);
+        assert!(!chat_is_blocked(chat, None, Some(&list)));
+        assert!(chat_is_blocked(-1_000_999_999_999, None, Some(&list)));
+        assert!(!chat_is_blocked(-1_000_999_999_999, None, Some(&json!([]))));
+    }
+
+    #[test]
+    fn blacklist_wins_over_whitelist() {
+        let chat = 42i64;
+        assert!(chat_is_blocked(
+            chat,
+            Some(&json!([42])),
+            Some(&json!([42]))
+        ));
+        assert!(!chat_is_blocked(chat, None, None));
+    }
 
     #[test]
     fn parses_include_filter() {

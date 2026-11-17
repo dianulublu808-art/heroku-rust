@@ -197,8 +197,8 @@ Notes:
 
 - Only `editable: Some(true)` receives message edits. This mirrors Python's
   default `editable=False`.
-- `only_docs` matches documents, videos and audio files (Telegram stores them as
-  documents).
+- `only_docs` and `no_docs` describe the same set: documents, videos and audio
+  files (Telegram stores videos and audio as documents).
 - `only_inline` / `no_inline` have no equivalent yet: message watchers never
   receive inline queries.
 - The legacy `has_watcher() -> true` + `on_message()` pair still works for one
