@@ -586,9 +586,10 @@ async fn finish_account(ctx: &Arc<Ctx>, one: OneShot, phone: &str, id: &str) -> 
     };
     one.quit().await;
 
-    let mut registry = Registry::load(&ctx.data_root);
-    registry.upsert(account.clone());
-    registry.save(&ctx.data_root)?;
+    Registry::update(&ctx.data_root, |registry| {
+        registry.upsert(account.clone());
+        Ok(())
+    })?;
     seed_account_db(ctx, &account.id, account.tg_id);
     clear_pending(ctx);
 
@@ -727,9 +728,10 @@ pub(crate) async fn switch_inline(ctx: &Arc<Ctx>, raw: &str) -> String {
         || target.eq_ignore_ascii_case("main")
         || target == "0"
     {
-        let mut registry = registry;
-        registry.active = None;
-        if let Err(err) = registry.save(&ctx.data_root) {
+        if let Err(err) = Registry::update(&ctx.data_root, |registry| {
+            registry.active = None;
+            Ok(())
+        }) {
             return ctx.tf(
                 "accounts.login_failed",
                 &[&escape_html(&format!("{err:#}"))],
@@ -756,9 +758,10 @@ pub(crate) async fn switch_inline(ctx: &Arc<Ctx>, raw: &str) -> String {
         return ctx.tf("accounts.already_active", &[&escape_html(&account.name)]);
     }
 
-    let mut registry = registry;
-    registry.active = Some(account.id.clone());
-    if let Err(err) = registry.save(&ctx.data_root) {
+    if let Err(err) = Registry::update(&ctx.data_root, |registry| {
+        registry.active = Some(account.id.clone());
+        Ok(())
+    }) {
         return ctx.tf(
             "accounts.login_failed",
             &[&escape_html(&format!("{err:#}"))],

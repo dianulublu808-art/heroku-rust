@@ -31,11 +31,24 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::ctx::Ctx;
-use crate::module::{CommandDef, ConfigKind};
+use crate::inline_units::InlineUnitRegistry;
+use crate::module::{CommandDef, ConfigKind, InlineQueryReply};
 use crate::security::NS as SECURITY_NS;
 use crate::tg::escape_html;
 
 pub const INLINE_NS: &str = "heroku.inline";
+
+/// Public Inline Manager 2.0 surface used by modules.
+///
+/// This is the documented import path for module authors. The compiler cannot
+/// see module code that is added later, hence the allow.
+#[allow(unused_imports)]
+pub use crate::inline_units::{
+    GalleryItem, InlineButton, InlineCallbackAction, InlineCallbackEvent, InlineCallbackFuture,
+    InlineCallbackHandler, InlineFormBuilder, InlineGalleryBuilder, InlineListBuilder, InlineMedia,
+    InlineMessageRef, InlinePage, InlineQueryGalleryBuilder, InlineUnitKind, InlineUnloadFuture,
+    InlineUnloadHandler, QueryGalleryItem,
+};
 const DEFAULT_THUMB: &str =
     "https://raw.githubusercontent.com/Heroku-userbot/assets/refs/heads/main/start_cmd.jpg";
 const SUPPORT_URL: &str = "https://t.me/heroku_talks";
@@ -120,6 +133,14 @@ impl CallbackDedup {
     }
 }
 
+/// Result of asking modules for inline-query results before the built-in
+/// command catalog runs.
+enum ModuleInlineOutcome {
+    Skip,
+    Results(Vec<Article>),
+    Answered,
+}
+
 fn callback_query_id(call: &CallbackQuery) -> Option<i64> {
     match &call.raw {
         tl::enums::Update::BotCallbackQuery(update) => Some(update.query_id),
@@ -136,6 +157,9 @@ pub struct InlineManager {
     restarting: AtomicBool,
     pending: StdMutex<HashMap<i64, PendingInput>>,
     callbacks: StdMutex<CallbackDedup>,
+    /// Interactive forms, lists, galleries and query galleries.
+    pub(crate) units: InlineUnitRegistry,
+    cleaner: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl Default for InlineManager {
@@ -153,6 +177,8 @@ impl InlineManager {
             restarting: AtomicBool::new(false),
             pending: StdMutex::new(HashMap::new()),
             callbacks: StdMutex::new(CallbackDedup::default()),
+            units: InlineUnitRegistry::default(),
+            cleaner: StdMutex::new(None),
         }
     }
 
@@ -249,6 +275,67 @@ impl InlineManager {
             .await
             .map_err(|err| anyhow::anyhow!("failed to send an inline card: {err}"))?;
         Ok(())
+    }
+
+    /// Send a fully prepared message from the inline bot. Used by the public
+    /// inline-unit API (forms, lists, galleries).
+    pub(crate) async fn send_input_message(
+        &self,
+        chat_id: i64,
+        message: InputMessage,
+    ) -> Result<i32> {
+        let runtime = self.runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            anyhow::bail!("inline bot is not running");
+        };
+        let peer = PeerId::from_bot_api_dialog_id(chat_id)
+            .context("invalid Telegram chat id")?
+            .to_ambient_ref();
+        runtime
+            .client
+            .send_message(peer, message)
+            .await
+            .map(|message| message.id())
+            .map_err(|err| anyhow::anyhow!("failed to send an inline unit: {err}"))
+    }
+
+    /// Edit a message previously sent by the inline bot.
+    pub(crate) async fn edit_input_message(
+        &self,
+        chat_id: i64,
+        message_id: i32,
+        message: InputMessage,
+    ) -> Result<()> {
+        let runtime = self.runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            anyhow::bail!("inline bot is not running");
+        };
+        let peer = PeerId::from_bot_api_dialog_id(chat_id)
+            .context("invalid Telegram chat id")?
+            .to_ambient_ref();
+        runtime
+            .client
+            .edit_message(peer, message_id, message)
+            .await
+            .map(|_| ())
+            .map_err(|err| anyhow::anyhow!("failed to edit an inline unit: {err}"))
+    }
+
+    /// Delete a message previously sent by the inline bot.
+    pub(crate) async fn delete_input_message(&self, chat_id: i64, message_id: i32) -> Result<()> {
+        let runtime = self.runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            anyhow::bail!("inline bot is not running");
+        };
+        let Some(peer) = PeerId::from_bot_api_dialog_id(chat_id) else {
+            anyhow::bail!("invalid Telegram chat id");
+        };
+        runtime
+            .client
+            .delete_messages(peer.to_ambient_ref(), &[message_id])
+            .await
+            .map(|_| ())
+            .map_err(|err| anyhow::anyhow!("failed to delete an inline unit: {err}"))
     }
 
     /// Send a quiz poll from the inline bot and return `(message_id, poll_id)`.
@@ -553,8 +640,41 @@ impl InlineManager {
         }
     }
 
+    fn start_cleaner(self: &Arc<Self>, ctx: &Arc<Ctx>) {
+        self.stop_cleaner();
+        let manager = Arc::clone(self);
+        let ctx = Arc::clone(ctx);
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(crate::inline_units::CLEANER_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                manager.cleanup_expired_units(&ctx).await;
+            }
+        });
+        if let Ok(mut slot) = self.cleaner.lock() {
+            *slot = Some(handle);
+        }
+    }
+
+    fn stop_cleaner(&self) {
+        if let Ok(mut slot) = self.cleaner.lock() {
+            if let Some(handle) = slot.take() {
+                handle.abort();
+            }
+        }
+    }
+
     /// Stop the bot connection and clear the runtime. Safe to call repeatedly.
     pub async fn stop(&self) {
+        self.stop_cleaner();
+        // Unit hooks need a `Ctx`; callers that have one use
+        // `unload_all_units` first. Without it we still drop the registry so
+        // stale buttons cannot be routed after the bot connection is gone.
+        let orphaned = self.units.take_all().len();
+        if orphaned > 0 {
+            debug!("Dropping {orphaned} inline unit(s) while stopping the bot");
+        }
         let runtime = self.runtime.lock().await.take();
         if let Ok(mut started) = self.started.lock() {
             *started = None;
@@ -577,6 +697,10 @@ impl InlineManager {
 
     /// Start (or restart) the bot from the stored token.
     pub async fn start(self: &Arc<Self>, ctx: &Arc<Ctx>) -> Result<()> {
+        // Units are bound to the previous bot connection. Run their hooks and
+        // delete their messages before reconnecting, then start the cleaner for
+        // the new runtime.
+        self.unload_all_units(ctx).await;
         self.stop().await;
 
         let Some(token) = Self::stored_token(ctx) else {
@@ -594,7 +718,10 @@ impl InlineManager {
         });
 
         match self.spawn_bot(ctx, &token).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.start_cleaner(ctx);
+                Ok(())
+            }
             Err(err) => {
                 let message = format!("{err:#}");
                 warn!("Inline bot failed to start: {message}");
@@ -747,6 +874,20 @@ impl InlineManager {
                 }
             }
             Update::InlineSend(send) => {
+                // Query-gallery articles use the unit id as the result id. The
+                // chosen inline message has no chat/message id, so remember its
+                // `InputBotInlineMessageId` for later callback edits.
+                if let Some(message_id) = send.message_id() {
+                    if self
+                        .units
+                        .attach_inline_message(send.result_id(), message_id)
+                    {
+                        debug!(
+                            unit_id = send.result_id(),
+                            "Attached an inline query result to its unit"
+                        );
+                    }
+                }
                 debug!(
                     "Inline result chosen by {} for query {:?}",
                     send.sender_id().bot_api_dialog_id_unchecked(),
@@ -783,11 +924,55 @@ impl InlineManager {
         }
 
         let text = query.text().trim().to_owned();
+
+        match self.module_inline_results(ctx, query, &text).await {
+            ModuleInlineOutcome::Answered => return Ok(()),
+            ModuleInlineOutcome::Results(results) if !results.is_empty() => {
+                query.answer(results).cache_time(0).send().await?;
+                return Ok(());
+            }
+            ModuleInlineOutcome::Results(_) | ModuleInlineOutcome::Skip => {}
+        }
+
         let results = self.build_results(ctx, user_id, &text).await;
         let mut answer = query.answer(results).cache_time(0);
         answer = answer.switch_pm(ctx.tr("inline.open_pm"), "start");
         answer.send().await?;
         Ok(())
+    }
+
+    /// Give modules a chance to answer an inline query before the built-in
+    /// command catalog. Failed and disabled modules are skipped, so a broken
+    /// module cannot take down inline mode.
+    async fn module_inline_results(
+        &self,
+        ctx: &Arc<Ctx>,
+        query: &InlineQuery,
+        text: &str,
+    ) -> ModuleInlineOutcome {
+        for module in ctx.modules.all() {
+            if !ctx.module_enabled(module.name()) {
+                continue;
+            }
+            let handlers = module.inline_handlers();
+            if handlers.is_empty() || !handlers.iter().any(|handler| handler.matches(text)) {
+                continue;
+            }
+            match module.on_inline_query(ctx, query, text).await {
+                Ok(InlineQueryReply::Skip) => {}
+                Ok(InlineQueryReply::Results(results)) => {
+                    return ModuleInlineOutcome::Results(results);
+                }
+                Ok(InlineQueryReply::Answered) => return ModuleInlineOutcome::Answered,
+                Err(err) => {
+                    warn!("Inline handler in {} failed: {err:#}", module.name());
+                    module
+                        .on_error(ctx, &format!("inline query {}", module.name()), &err)
+                        .await;
+                }
+            }
+        }
+        ModuleInlineOutcome::Skip
     }
 
     fn inline_allowed(&self, ctx: &Ctx, user_id: i64) -> bool {
@@ -853,6 +1038,9 @@ impl InlineManager {
         let mut matched = 0usize;
 
         for module in ctx.modules.all() {
+            if ctx.module_failed(module.name()).is_some() {
+                continue;
+            }
             for command in module.commands() {
                 let hit = command.name.to_lowercase().contains(&lower)
                     || command.description.to_lowercase().contains(&lower)
@@ -983,6 +1171,9 @@ impl InlineManager {
         let mut lines = String::new();
         let mut seen = std::collections::HashSet::new();
         for module in ctx.modules.all() {
+            if ctx.module_failed(module.name()).is_some() {
+                continue;
+            }
             for command in module.commands() {
                 if !seen.insert(command.name) {
                     continue;
@@ -1108,7 +1299,15 @@ impl InlineManager {
                 ("ram", &ram_usage()),
                 ("cpu", &cpu_usage()),
                 ("host", &host_name()),
-                ("modules", &ctx.modules.all().len().to_string()),
+                (
+                    "modules",
+                    &ctx.modules
+                        .all()
+                        .iter()
+                        .filter(|module| ctx.module_enabled(module.name()))
+                        .count()
+                        .to_string(),
+                ),
             ],
         )
     }
@@ -1789,6 +1988,18 @@ impl InlineManager {
             }
         }
 
+        // Inline Manager 2.0 units own `hu:` payloads. A unit can either handle
+        // the callback itself or let the normal module dispatcher receive the
+        // original payload (for backwards compatibility).
+        if let Some(unit_callback) = crate::inline_units::UnitCallback::parse(&data) {
+            if self
+                .handle_unit_callback(ctx, call, unit_callback, sender)
+                .await?
+            {
+                return Ok(());
+            }
+        }
+
         match data.as_str() {
             "heroku:profile" => {
                 if !allowed {
@@ -2354,7 +2565,7 @@ impl InlineManager {
 
     /// Give external and built-in modules a chance to consume callbacks they
     /// created themselves. Built-in `heroku:*` payloads are handled above.
-    async fn dispatch_module_callback(
+    pub(crate) async fn dispatch_module_callback(
         &self,
         ctx: &Arc<Ctx>,
         call: &CallbackQuery,
@@ -2362,7 +2573,10 @@ impl InlineManager {
         sender: i64,
     ) -> bool {
         for module in ctx.modules.all() {
-            if !module.has_callback() || !module.callback_allowed(ctx, sender) {
+            if !ctx.module_enabled(module.name())
+                || !module.has_callback()
+                || !module.callback_allowed(ctx, sender)
+            {
                 continue;
             }
             match module.on_callback(ctx, call, data).await {
@@ -2456,6 +2670,9 @@ fn config_list_card(ctx: &Ctx) -> (String, Vec<Vec<Button>>) {
     let mut rows = Vec::new();
 
     for (index, module) in ctx.modules.all().iter().enumerate() {
+        if ctx.module_failed(module.name()).is_some() {
+            continue;
+        }
         let specs = module.config_spec();
         if specs.is_empty() {
             continue;
@@ -2478,6 +2695,9 @@ fn config_list_card(ctx: &Ctx) -> (String, Vec<Vec<Button>>) {
 
 fn config_module_card(ctx: &Ctx, index: usize) -> Option<(String, Vec<Vec<Button>>)> {
     let module = ctx.modules.all().get(index)?;
+    if ctx.module_failed(module.name()).is_some() {
+        return None;
+    }
     let specs = module.config_spec();
     if specs.is_empty() {
         return None;
@@ -2560,9 +2780,10 @@ fn help_page_card(ctx: &Ctx, page: usize, sender: i64) -> (String, Vec<Vec<Butto
         .iter()
         .enumerate()
         .filter(|(_, module)| {
-            !hidden
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(module.name()))
+            ctx.module_failed(module.name()).is_none()
+                && !hidden
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(module.name()))
         })
         // Show a user only the modules and commands their security mask allows,
         // matching the Python help menu.
@@ -2626,6 +2847,9 @@ fn help_page_card(ctx: &Ctx, page: usize, sender: i64) -> (String, Vec<Vec<Butto
 
 fn help_module_card(ctx: &Ctx, index: usize, sender: i64) -> Option<(String, Vec<Vec<Button>>)> {
     let module = ctx.modules.all().get(index)?;
+    if ctx.module_failed(module.name()).is_some() {
+        return None;
+    }
     let commands = visible_commands(ctx, module, sender);
     if commands.is_empty() && !privileged(ctx, sender) {
         return None;
@@ -2704,6 +2928,9 @@ fn command_catalog(ctx: &Ctx) -> Vec<CommandInfo> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for module in ctx.modules.all() {
+        if ctx.module_failed(module.name()).is_some() {
+            continue;
+        }
         for command in module.commands() {
             if !seen.insert(command.name.to_owned()) {
                 continue;

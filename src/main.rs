@@ -16,6 +16,8 @@ mod ctx;
 mod database;
 mod dispatcher;
 mod inline;
+mod inline_units;
+mod lifecycle;
 mod logbuf;
 mod login;
 mod module;
@@ -173,7 +175,8 @@ async fn async_main() -> Result<()> {
         me_id,
         me_username,
         me_name,
-        loaded_modules: Ctx::new_loaded_modules(),
+        lifecycle: Ctx::new_lifecycle(),
+        module_tasks: Ctx::new_module_tasks(),
     });
 
     for module in ctx.modules.all() {
@@ -204,18 +207,9 @@ async fn async_main() -> Result<()> {
             debug!("Module {} is disabled in settings", module.name());
             continue;
         }
-        match module.on_load(&ctx).await {
-            Ok(()) => {
-                ctx.mark_module_loaded(module.name());
-                tracing::debug!("Loaded module {}", module.name());
-            }
-            Err(err) => {
-                error!("Failed to load module {}: {err:#}", module.name());
-                module
-                    .on_error(&ctx, &format!("on_load {}", module.name()), &err)
-                    .await;
-            }
-        }
+        // `lifecycle::load` validates watcher regexes, runs the hook, tracks
+        // success/failure and rolls back partial registrations + tasks on error.
+        let _ = lifecycle::load(&ctx, module).await;
     }
 
     warm_up_dialogs(client.clone());
@@ -317,14 +311,16 @@ async fn async_main() -> Result<()> {
         if !ctx.module_loaded(module.name()) {
             continue;
         }
-        if let Err(err) = module.on_unload(&ctx).await {
-            error!("Failed to unload module {}: {err:#}", module.name());
-            module
-                .on_error(&ctx, &format!("on_unload {}", module.name()), &err)
-                .await;
-        }
+        lifecycle::unload(&ctx, module).await;
+    }
+    // Safety net for tasks owned by modules that never finished loading or
+    // whose `on_unload` hook failed.
+    let leaked_tasks = ctx.abort_all_module_tasks();
+    if leaked_tasks > 0 {
+        warn!("Aborted {leaked_tasks} module task(s) left over after unload");
     }
 
+    ctx.inline.unload_all_units(&ctx).await;
     ctx.inline.stop().await;
 
     if let Err(err) = updates.sync_update_state().await {

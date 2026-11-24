@@ -35,7 +35,7 @@ impl Module for Quickstart {
         // Prepare the content channel and the Assets/Backups forum topics in the
         // background, exactly like Python's `client_ready` hook.
         let content_ctx = ctx.clone();
-        tokio::spawn(async move {
+        ctx.spawn_module_task(self.name(), async move {
             if let Err(err) = crate::content::ensure_topics(&content_ctx).await {
                 tracing::warn!("Failed to prepare the content channel: {err:#}");
             }
@@ -43,7 +43,7 @@ impl Module for Quickstart {
 
         // Python's `client_ready` also asks the owner to join the support chat.
         let join_ctx = ctx.clone();
-        tokio::spawn(async move {
+        ctx.spawn_module_task(self.name(), async move {
             match crate::content::request_join(&join_ctx, crate::content::SUPPORT_CHAT, JOIN_REASON)
                 .await
             {

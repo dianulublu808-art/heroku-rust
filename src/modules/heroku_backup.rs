@@ -64,7 +64,7 @@ impl Module for HerokuBackupMod {
         // owner has picked a period (including "Never", stored as 0).
         if ctx.db.get_value("HerokuBackupMod", "period").is_none() {
             let setup_ctx = ctx.clone();
-            tokio::spawn(async move {
+            ctx.spawn_module_task(self.name(), async move {
                 let (html, buttons) = period_prompt_card(&setup_ctx);
                 if setup_ctx
                     .inline
@@ -83,28 +83,29 @@ impl Module for HerokuBackupMod {
             });
         }
 
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
+        let task_ctx = ctx.clone();
+        ctx.spawn_module_task(self.name(), async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
             loop {
                 ticker.tick().await;
-                let period = backup_period(&ctx);
+                let period = backup_period(&task_ctx);
                 if period <= 0 {
                     continue;
                 }
                 let now = chrono::Utc::now().timestamp();
-                let last = ctx.db.get_i64("HerokuBackupMod", "last_backup", 0);
+                let last = task_ctx.db.get_i64("HerokuBackupMod", "last_backup", 0);
                 if now - last < period {
                     continue;
                 }
-                ctx.db.set("HerokuBackupMod", "last_backup", now);
-                match create_backup(&ctx) {
+                task_ctx.db.set("HerokuBackupMod", "last_backup", now);
+                match create_backup(&task_ctx) {
                     Ok(path) => {
-                        let caption = ctx.tr("backup.auto_caption");
-                        match send_backup_to_channel(&ctx, &path, caption, Vec::new()).await {
+                        let caption = task_ctx.tr("backup.auto_caption");
+                        match send_backup_to_channel(&task_ctx, &path, caption, Vec::new()).await {
                             Ok(Some(link)) => {
-                                let _ =
-                                    ctx.send_self(ctx.tf("backup.sent_channel", &[&link])).await;
+                                let _ = task_ctx
+                                    .send_self(task_ctx.tf("backup.sent_channel", &[&link]))
+                                    .await;
                             }
                             Ok(None) => {}
                             Err(err) => {

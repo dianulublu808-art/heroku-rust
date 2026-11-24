@@ -3,7 +3,8 @@
 
 //! Shared runtime context available to every module.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -14,6 +15,7 @@ use grammers_client::Client;
 use grammers_session::storages::ErasedSession;
 use grammers_session::types::{PeerId, PeerKind, PeerRef};
 use serde_json::Value;
+use tokio::task::JoinHandle;
 
 use crate::config::Config;
 use crate::database::Database;
@@ -25,6 +27,135 @@ use crate::module::{
 use crate::security::Security;
 use crate::tg::{escape_html, Msg};
 use crate::translations::Translator;
+
+/// Upper bound on tasks a single module may keep alive at once. Modules that
+/// spawn per update should let those tasks finish; long-running loops are
+/// usually one or two per module.
+const MODULE_TASK_LIMIT: usize = 256;
+
+/// Runtime lifecycle of a module.
+///
+/// `loaded` means `on_load` completed successfully. `failed` keeps the reason a
+/// module is unusable so dispatch, help and inline handlers can skip it without
+/// retrying the hook on every update.
+#[derive(Default)]
+pub(crate) struct ModuleLifecycle {
+    loaded: HashSet<String>,
+    failed: HashMap<String, String>,
+}
+
+impl ModuleLifecycle {
+    fn key(name: &str) -> String {
+        name.to_lowercase()
+    }
+
+    pub(crate) fn is_loaded(&self, name: &str) -> bool {
+        self.loaded.contains(&Self::key(name))
+    }
+
+    pub(crate) fn failure(&self, name: &str) -> Option<String> {
+        self.failed.get(&Self::key(name)).cloned()
+    }
+
+    pub(crate) fn mark_loaded(&mut self, name: &str) {
+        let key = Self::key(name);
+        self.failed.remove(&key);
+        self.loaded.insert(key);
+    }
+
+    pub(crate) fn mark_failed(&mut self, name: &str, reason: String) {
+        let key = Self::key(name);
+        self.loaded.remove(&key);
+        self.failed.insert(key, reason);
+    }
+
+    pub(crate) fn mark_unloaded(&mut self, name: &str) {
+        let key = Self::key(name);
+        self.loaded.remove(&key);
+        self.failed.remove(&key);
+    }
+
+    pub(crate) fn failed_modules(&self) -> Vec<(String, String)> {
+        let mut modules: Vec<(String, String)> = self
+            .failed
+            .iter()
+            .map(|(name, reason)| (name.clone(), reason.clone()))
+            .collect();
+        modules.sort_by(|left, right| left.0.cmp(&right.0));
+        modules
+    }
+}
+
+/// Tasks spawned by a module through [`Ctx::spawn_module_task`]. They are
+/// aborted when the module is unloaded or its `on_load` fails, so a failed
+/// reload cannot leave background loops behind.
+#[derive(Default)]
+pub(crate) struct ModuleTasks {
+    tasks: Mutex<HashMap<String, Vec<JoinHandle<()>>>>,
+}
+
+impl ModuleTasks {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<JoinHandle<()>>>> {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn spawn<F>(&self, module: &str, future: F) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let key = module.to_lowercase();
+        let mut tasks = self.lock();
+        let handles = tasks.entry(key).or_default();
+        handles.retain(|handle| !handle.is_finished());
+        if handles.len() >= MODULE_TASK_LIMIT {
+            tracing::error!(
+                module,
+                "Refusing to spawn another task: module already owns {MODULE_TASK_LIMIT} live tasks"
+            );
+            return false;
+        }
+        handles.push(tokio::spawn(future));
+        true
+    }
+
+    pub(crate) fn abort(&self, module: &str) -> usize {
+        let handles = self
+            .lock()
+            .remove(&module.to_lowercase())
+            .unwrap_or_default();
+        let count = handles.len();
+        for handle in handles {
+            handle.abort();
+        }
+        count
+    }
+
+    pub(crate) fn abort_all(&self) -> usize {
+        let mut tasks = self.lock();
+        let mut count = 0usize;
+        for (_, handles) in tasks.drain() {
+            count += handles.len();
+            for handle in handles {
+                handle.abort();
+            }
+        }
+        count
+    }
+
+    pub(crate) fn count(&self, module: &str) -> usize {
+        self.lock()
+            .get(&module.to_lowercase())
+            .map(|handles| {
+                handles
+                    .iter()
+                    .filter(|handle| !handle.is_finished())
+                    .count()
+            })
+            .unwrap_or_default()
+    }
+}
 
 pub struct Ctx {
     pub client: Client,
@@ -41,33 +172,73 @@ pub struct Ctx {
     pub me_id: i64,
     pub me_username: Option<String>,
     pub me_name: String,
-    /// Modules whose `on_load` hook completed. Kept in sync by the startup
-    /// path and `.togglemod`, so hooks never run twice.
-    pub(crate) loaded_modules: Mutex<HashSet<String>>,
+    /// Loaded/failed module state. Kept in sync by the startup path and
+    /// `.togglemod`, so hooks never run twice and broken modules never receive
+    /// updates.
+    pub(crate) lifecycle: Mutex<ModuleLifecycle>,
+    /// Background tasks owned by modules, aborted on unload or failed load.
+    pub(crate) module_tasks: ModuleTasks,
 }
 
 impl Ctx {
-    pub fn new_loaded_modules() -> Mutex<HashSet<String>> {
-        Mutex::new(HashSet::new())
+    pub fn new_lifecycle() -> Mutex<ModuleLifecycle> {
+        Mutex::new(ModuleLifecycle::default())
+    }
+
+    pub fn new_module_tasks() -> ModuleTasks {
+        ModuleTasks::default()
+    }
+
+    fn lifecycle_state(&self) -> std::sync::MutexGuard<'_, ModuleLifecycle> {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn module_loaded(&self, name: &str) -> bool {
-        self.loaded_modules
-            .lock()
-            .map(|loaded| loaded.contains(&name.to_lowercase()))
-            .unwrap_or(false)
+        self.lifecycle_state().is_loaded(name)
+    }
+
+    pub fn module_failed(&self, name: &str) -> Option<String> {
+        self.lifecycle_state().failure(name)
+    }
+
+    pub fn failed_modules(&self) -> Vec<(String, String)> {
+        self.lifecycle_state().failed_modules()
     }
 
     pub fn mark_module_loaded(&self, name: &str) {
-        if let Ok(mut loaded) = self.loaded_modules.lock() {
-            loaded.insert(name.to_lowercase());
-        }
+        self.lifecycle_state().mark_loaded(name);
+    }
+
+    pub fn mark_module_failed(&self, name: &str, reason: impl Into<String>) {
+        self.lifecycle_state().mark_failed(name, reason.into());
     }
 
     pub fn mark_module_unloaded(&self, name: &str) {
-        if let Ok(mut loaded) = self.loaded_modules.lock() {
-            loaded.remove(&name.to_lowercase());
-        }
+        self.lifecycle_state().mark_unloaded(name);
+    }
+
+    /// Spawn a background task owned by `module`. Prefer this over a bare
+    /// `tokio::spawn` inside `on_load`: the runtime aborts owned tasks when the
+    /// module is unloaded or fails to load.
+    pub fn spawn_module_task<F>(&self, module: &str, future: F) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.module_tasks.spawn(module, future)
+    }
+
+    pub fn abort_module_tasks(&self, module: &str) -> usize {
+        self.module_tasks.abort(module)
+    }
+
+    pub fn abort_all_module_tasks(&self) -> usize {
+        self.module_tasks.abort_all()
+    }
+
+    pub fn module_task_count(&self, module: &str) -> usize {
+        self.module_tasks.count(module)
     }
 
     pub fn tr(&self, key: &str) -> String {
@@ -157,6 +328,12 @@ impl Ctx {
     }
 
     pub fn module_enabled(&self, module: &str) -> bool {
+        // A module that failed to load is not usable even when the database
+        // still lists it as enabled: its handlers and watchers were never
+        // registered, so dispatching to it would only produce errors.
+        if self.module_failed(module).is_some() {
+            return false;
+        }
         let disabled = self.db.get_string_list("heroku.main", "disabled_modules");
         !disabled
             .iter()
@@ -309,5 +486,89 @@ impl Ctx {
 
     pub fn chat_is_private(message: &Msg) -> bool {
         message.inner.peer_id().kind() == PeerKind::User
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{ModuleLifecycle, ModuleTasks};
+
+    #[test]
+    fn failed_module_is_not_loaded_and_reload_clears_the_failure() {
+        let mut lifecycle = ModuleLifecycle::default();
+        lifecycle.mark_loaded("DemoMod");
+        assert!(lifecycle.is_loaded("DemoMod"));
+        assert!(lifecycle.failure("DemoMod").is_none());
+
+        lifecycle.mark_failed("DemoMod", "on_load exploded".to_owned());
+        assert!(!lifecycle.is_loaded("DemoMod"));
+        assert_eq!(
+            lifecycle.failure("DemoMod").as_deref(),
+            Some("on_load exploded")
+        );
+
+        lifecycle.mark_loaded("DemoMod");
+        assert!(lifecycle.is_loaded("DemoMod"));
+        assert!(lifecycle.failure("DemoMod").is_none());
+        assert!(lifecycle.failed_modules().is_empty());
+    }
+
+    #[test]
+    fn unloading_forgets_a_previous_failure() {
+        let mut lifecycle = ModuleLifecycle::default();
+        lifecycle.mark_failed("DemoMod", "boom".to_owned());
+        lifecycle.mark_unloaded("DemoMod");
+        assert!(!lifecycle.is_loaded("DemoMod"));
+        assert!(lifecycle.failure("DemoMod").is_none());
+    }
+
+    #[tokio::test]
+    async fn managed_tasks_are_scoped_per_module_and_aborted() {
+        let tasks = ModuleTasks::default();
+        let first = std::sync::Arc::new(AtomicUsize::new(0));
+        let second = std::sync::Arc::new(AtomicUsize::new(0));
+
+        assert!(tasks.spawn("AlphaMod", {
+            let counter = first.clone();
+            async move {
+                loop {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            }
+        }));
+        assert!(tasks.spawn("BetaMod", {
+            let counter = second.clone();
+            async move {
+                loop {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            }
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(tasks.count("AlphaMod"), 1);
+        assert_eq!(tasks.count("BetaMod"), 1);
+
+        assert_eq!(tasks.abort("AlphaMod"), 1);
+        assert_eq!(tasks.count("AlphaMod"), 0);
+        assert_eq!(tasks.count("BetaMod"), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let frozen = first.load(Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            first.load(Ordering::Relaxed),
+            frozen,
+            "aborted task must stop running"
+        );
+        assert!(
+            second.load(Ordering::Relaxed) > 0,
+            "other module kept running"
+        );
+
+        assert_eq!(tasks.abort_all(), 1);
+        assert_eq!(tasks.count("BetaMod"), 0);
     }
 }

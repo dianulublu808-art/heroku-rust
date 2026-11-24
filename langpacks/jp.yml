@@ -523,6 +523,8 @@ inline:
   prefix_reset: "✅ プレフィックスを <code>.</code> にリセット"
   menu_closed: "😌 <b>メニューは終了しました。</b>"
   callback_forbidden: "🚫 このアクションは所有者のみが行うことができます。"
+  unit_expired: "⌛ このインラインフォームは期限切れです。"
+  callback_error: "⚠️ インラインアクションに失敗しました。詳細はログを確認してください。"
   expected_text: "✍️ <b>テキストによる回答が必要です。</b>\n要求された値を通常のメッセージとして送信します。"
 
 accounts:

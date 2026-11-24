@@ -55,28 +55,29 @@ struct Quiz {
 
 static QUIZ: Lazy<Mutex<Option<Quiz>>> = Lazy::new(|| Mutex::new(None));
 
-/// Called from the `LoaderRestrictor` module's `on_load` hook.
-pub(crate) async fn on_load(ctx: &Arc<Ctx>) -> Result<()> {
+/// Called from the `LoaderRestrictor` module's `on_load` hook. The delayed
+/// prompt is a managed task, so unloading the module cancels it.
+pub(crate) async fn on_load(ctx: &Arc<Ctx>, module: &str) -> Result<()> {
     if is_passed(ctx) {
         return Ok(());
     }
 
     // Python sends the unlock prompt from `inline_ready`. Give the welcome
     // and backup cards a moment to arrive first, then offer the quiz.
-    let ctx = ctx.clone();
-    tokio::spawn(async move {
+    let task_ctx = ctx.clone();
+    ctx.spawn_module_task(module, async move {
         tokio::time::sleep(Duration::from_secs(6)).await;
-        if is_passed(&ctx) {
+        if is_passed(&task_ctx) {
             return;
         }
-        let html = ctx.tr("loader_restrictor.unlock_prompt");
+        let html = task_ctx.tr("loader_restrictor.unlock_prompt");
         let buttons = vec![vec![Button::data(
-            ctx.tr("loader_restrictor.unlock_prompt_btn"),
+            task_ctx.tr("loader_restrictor.unlock_prompt_btn"),
             b"heroku:lmverify".to_vec(),
         )]];
-        let _ = ctx
+        let _ = task_ctx
             .inline
-            .send_to_user(&ctx, ctx.me_id, html, buttons)
+            .send_to_user(&task_ctx, task_ctx.me_id, html, buttons)
             .await;
     });
     Ok(())

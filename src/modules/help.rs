@@ -140,6 +140,9 @@ impl Help {
         let mut body = String::new();
         let mut shown = 0usize;
         for module in ctx.modules.all() {
+            if ctx.module_failed(module.name()).is_some() {
+                continue;
+            }
             if hidden
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case(module.name()))
@@ -200,6 +203,10 @@ impl Help {
             user_id == ctx.me_id || ctx.security.is_owner(user_id) || ctx.security.is_sudo(user_id);
 
         if let Some(module) = ctx.modules.get(query) {
+            if ctx.module_failed(module.name()).is_some() {
+                message.reply_html(ctx.tr("help.no_module")).await?;
+                return Ok(());
+            }
             if ctx
                 .inline
                 .send_help_module(ctx, user_id, module.name())
@@ -270,13 +277,14 @@ impl Help {
 
         let matches = ctx.modules.find_command(query);
         if let Some((module, command)) = matches.last().filter(|(module, command)| {
-            ctx.security.inline_allowed(
-                ctx.me_id,
-                user_id,
-                module.name(),
-                command.name,
-                command.security,
-            )
+            ctx.module_failed(module.name()).is_none()
+                && ctx.security.inline_allowed(
+                    ctx.me_id,
+                    user_id,
+                    module.name(),
+                    command.name,
+                    command.security,
+                )
         }) {
             let usage = if command.usage.is_empty() {
                 format!("{prefix}{}", command.name)
@@ -332,6 +340,9 @@ impl Help {
 
         let mut lines: Vec<String> = Vec::new();
         for module in ctx.modules.all() {
+            if ctx.module_failed(module.name()).is_some() {
+                continue;
+            }
             if module.name().to_lowercase().contains(&needle)
                 || module.description().to_lowercase().contains(&needle)
             {

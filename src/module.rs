@@ -5,17 +5,19 @@
 //! plugin discovery.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use grammers_client::update::{Article, InlineQuery};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 
 use crate::args::Args;
 use crate::ctx::Ctx;
-use crate::tg::Msg;
+use crate::tg::{MediaKind, Msg};
 
 // Security flags. They match the bitmask used by Heroku/Hikka, so existing
 // database values keep working.
@@ -45,7 +47,12 @@ pub const GROUP_ADMIN_ANY: u32 = GROUP_ADMIN_ADD_ADMINS
 /// is made to the [`Module`] trait or its data types. Modules may declare
 /// [`Module::api_version`] and are warned at load time when they target a newer
 /// API than the host provides.
-pub const MODULE_API_VERSION: u32 = 2;
+///
+/// History:
+/// - 2 — declarative watchers, inline handlers, managed tasks and lifecycle.
+/// - 3 — [`WatcherFilter::func`] (Python `filter=`) and shared watcher
+///   predicates.
+pub const MODULE_API_VERSION: u32 = 3;
 
 pub const DEFAULT_PERMISSIONS: u32 = OWNER;
 pub const ALL: u32 = (1 << 14) - 1;
@@ -186,12 +193,116 @@ impl ConfigSpec {
     }
 }
 
+/// Custom watcher predicate, the Rust equivalent of Python's `filter=`
+/// decorator argument.
+///
+/// The closure is shared through an [`Arc`], so cloning a [`WatcherFilter`] is
+/// cheap and every clone observes the same captured state. It is called only
+/// after all declarative filters matched, which keeps expensive checks off the
+/// dispatcher hot path.
+#[derive(Clone)]
+pub struct WatcherFunc(Arc<dyn Fn(&Msg) -> bool + Send + Sync + 'static>);
+
+impl WatcherFunc {
+    pub fn new<F>(func: F) -> Self
+    where
+        F: Fn(&Msg) -> bool + Send + Sync + 'static,
+    {
+        Self(Arc::new(func))
+    }
+
+    /// Run the predicate against a message.
+    pub fn call(&self, message: &Msg) -> bool {
+        (self.0)(message)
+    }
+}
+
+impl fmt::Debug for WatcherFunc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Closures cannot be formatted; avoid leaking an address into logs.
+        f.write_str("WatcherFunc(..)")
+    }
+}
+
+impl<F> From<F> for WatcherFunc
+where
+    F: Fn(&Msg) -> bool + Send + Sync + 'static,
+{
+    fn from(func: F) -> Self {
+        Self::new(func)
+    }
+}
+
+impl std::ops::Deref for WatcherFunc {
+    type Target = dyn Fn(&Msg) -> bool + Send + Sync;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+/// Apply the optional custom predicate after the declarative filters.
+///
+/// Kept as a free function so short-circuiting can be unit-tested without a
+/// real Telegram [`Msg`].
+fn combine_func<T>(
+    declarative_match: bool,
+    func: Option<&(dyn Fn(&T) -> bool + Send + Sync)>,
+    input: &T,
+) -> bool {
+    declarative_match && func.is_none_or(|func| func(input))
+}
+
+/// Read-only snapshot of the message fields used by [`WatcherFilter`].
+///
+/// Keeping the filter logic independent from a live [`Msg`] makes every
+/// combination testable without a Telegram connection. The dispatcher builds
+/// one view per update and the custom `func` predicate still receives the real
+/// message afterwards.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WatcherView<'a> {
+    pub text: &'a str,
+    pub outgoing: bool,
+    pub is_private: bool,
+    pub is_group: bool,
+    pub is_channel: bool,
+    pub media: MediaKind,
+    pub forwarded: bool,
+    pub inline: bool,
+    pub has_reply: bool,
+    pub mentioned: bool,
+    pub sender_id: Option<i64>,
+    pub chat_id: i64,
+}
+
+impl<'a> From<&'a Msg> for WatcherView<'a> {
+    fn from(message: &'a Msg) -> Self {
+        Self {
+            text: message.text(),
+            outgoing: message.outgoing(),
+            is_private: message.is_private(),
+            is_group: message.is_group(),
+            is_channel: message.is_channel(),
+            media: message.media_kind(),
+            forwarded: message.is_forwarded(),
+            inline: message.is_inline(),
+            has_reply: message.has_reply(),
+            mentioned: message.mentioned(),
+            sender_id: message.sender_id(),
+            chat_id: message.chat_id(),
+        }
+    }
+}
+
 /// Declarative filters for a [`WatcherDef`].
 ///
 /// All fields are optional and combine with logical AND, matching Heroku's
 /// watcher decorators. Media filters use [`Msg::media_kind`]. A watcher with
 /// `editable: Some(true)` also receives message edits; every other watcher only
 /// sees new messages.
+///
+/// [`WatcherFilter::func`] mirrors Python's `filter=` argument: a custom
+/// predicate that runs only after every declarative filter has matched.
 #[derive(Clone, Debug, Default)]
 pub struct WatcherFilter {
     /// Only messages that are not commands.
@@ -222,6 +333,9 @@ pub struct WatcherFilter {
     pub no_groups: bool,
     pub no_forwards: bool,
     pub only_forwards: bool,
+    /// Messages sent via a bot in inline mode (`via_bot_id`).
+    pub only_inline: bool,
+    pub no_inline: bool,
     pub no_reply: bool,
     pub only_reply: bool,
     pub no_mention: bool,
@@ -232,6 +346,9 @@ pub struct WatcherFilter {
     pub regex: Option<String>,
     pub from_id: Option<i64>,
     pub chat_id: Option<i64>,
+    /// Custom predicate (Python `filter=`), called after every declarative
+    /// filter matched. Build it with [`WatcherFilter::with_func`].
+    pub func: Option<WatcherFunc>,
 }
 
 /// Upper bound for the watcher regex cache. Modules call `watchers()` on every
@@ -268,6 +385,42 @@ fn cached_regex(pattern: &str) -> Option<Regex> {
 }
 
 impl WatcherFilter {
+    /// Attach a custom predicate (Python `filter=`). It runs after the
+    /// declarative filters, so it is not called for messages they already
+    /// reject.
+    pub fn with_func<F>(mut self, func: F) -> Self
+    where
+        F: Fn(&Msg) -> bool + Send + Sync + 'static,
+    {
+        self.func = Some(WatcherFunc::new(func));
+        self
+    }
+
+    /// Replace the custom predicate in place.
+    pub fn set_func<F>(&mut self, func: F)
+    where
+        F: Fn(&Msg) -> bool + Send + Sync + 'static,
+    {
+        self.func = Some(WatcherFunc::new(func));
+    }
+
+    /// Whether a custom predicate is configured.
+    pub fn has_func(&self) -> bool {
+        self.func.is_some()
+    }
+
+    /// Compile the watcher regex, if any, and report a useful error instead of
+    /// silently never matching. Called when a module is loaded and when watcher
+    /// filters are registered.
+    pub fn validate_regex(&self) -> Result<(), String> {
+        let Some(pattern) = self.regex.as_deref() else {
+            return Ok(());
+        };
+        Regex::new(pattern)
+            .map(|_| ())
+            .map_err(|err| format!("invalid watcher regex {pattern:?}: {err}"))
+    }
+
     /// Text-only part of the filter. Exposed for unit tests and for modules
     /// that already have a message-like value.
     pub fn matches_text(&self, text: &str) -> bool {
@@ -296,9 +449,7 @@ impl WatcherFilter {
 
     /// Media part of the filter. Kept separate so it can be tested without a
     /// real Telegram update.
-    pub fn matches_media(&self, media: crate::tg::MediaKind) -> bool {
-        use crate::tg::MediaKind;
-
+    pub fn matches_media(&self, media: MediaKind) -> bool {
         if self.no_media && media.is_media() {
             return false;
         }
@@ -357,88 +508,144 @@ impl WatcherFilter {
 
     /// Evaluate the complete filter against a real update.
     pub fn matches(&self, ctx: &Ctx, message: &Msg, edited: bool) -> bool {
+        let view = WatcherView::from(message);
+        let prefixes = if self.no_commands || self.only_commands {
+            ctx.prefixes(message.sender_id().unwrap_or(ctx.me_id))
+        } else {
+            Vec::new()
+        };
+        combine_func(
+            self.matches_view(&view, &prefixes, edited),
+            self.func.as_deref(),
+            message,
+        )
+    }
+
+    /// Declarative part of [`WatcherFilter::matches`], separated so watcher
+    /// combinations can be tested without constructing a live [`Msg`].
+    pub(crate) fn matches_view(
+        &self,
+        view: &WatcherView<'_>,
+        prefixes: &[String],
+        edited: bool,
+    ) -> bool {
         if edited && self.editable != Some(true) {
             return false;
         }
 
         if let Some(expected) = self.outgoing {
-            if message.outgoing() != expected {
+            if view.outgoing != expected {
                 return false;
             }
         }
 
-        let private = message.is_private();
-        let group = message.is_group();
-        let channel = message.is_channel();
-        if self.only_pm && !private {
+        if self.only_pm && !view.is_private {
             return false;
         }
-        if self.no_pm && private {
+        if self.no_pm && view.is_private {
             return false;
         }
-        if self.only_groups && !group {
+        if self.only_groups && !view.is_group {
             return false;
         }
-        if self.no_groups && group {
+        if self.no_groups && view.is_group {
             return false;
         }
-        if self.only_channels && !channel {
+        if self.only_channels && !view.is_channel {
             return false;
         }
-        if self.no_channels && channel {
+        if self.no_channels && view.is_channel {
             return false;
         }
 
-        if !self.matches_media(message.media_kind()) {
+        if !self.matches_media(view.media) {
             return false;
         }
 
-        if self.no_forwards && message.is_forwarded() {
+        if self.no_forwards && view.forwarded {
             return false;
         }
-        if self.only_forwards && !message.is_forwarded() {
+        if self.only_forwards && !view.forwarded {
             return false;
         }
-        if self.no_reply && message.has_reply() {
+        if self.no_inline && view.inline {
             return false;
         }
-        if self.only_reply && !message.has_reply() {
+        if self.only_inline && !view.inline {
             return false;
         }
-        if self.mention && !message.mentioned() {
+        if self.no_reply && view.has_reply {
             return false;
         }
-        if self.no_mention && message.mentioned() {
+        if self.only_reply && !view.has_reply {
+            return false;
+        }
+        if self.mention && !view.mentioned {
+            return false;
+        }
+        if self.no_mention && view.mentioned {
             return false;
         }
         if let Some(expected) = self.from_id {
-            if message.sender_id() != Some(expected) {
+            if view.sender_id != Some(expected) {
                 return false;
             }
         }
         if let Some(expected) = self.chat_id {
-            if message.chat_id() != expected {
+            if view.chat_id != expected {
                 return false;
             }
         }
 
-        let text = message.text();
-        if self.no_commands && is_command_text(ctx, message, text) {
+        if self.no_commands && is_command_text(prefixes, view.text) {
             return false;
         }
-        if self.only_commands && !is_command_text(ctx, message, text) {
+        if self.only_commands && !is_command_text(prefixes, view.text) {
             return false;
         }
-        self.matches_text(text)
+        self.matches_text(view.text)
     }
 }
 
-fn is_command_text(ctx: &Ctx, message: &Msg, text: &str) -> bool {
-    let sender = message.sender_id().unwrap_or(ctx.me_id);
+fn is_command_text(prefixes: &[String], text: &str) -> bool {
     let text = text.trim_start();
-    ctx.prefixes(sender)
+    prefixes
         .iter()
         .any(|prefix| !prefix.is_empty() && text.starts_with(prefix.as_str()))
+}
+
+/// A declared inline-query handler. `prefix` limits the handler to queries that
+/// start with a given word (case-insensitive); `None` means every query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InlineHandlerDef {
+    pub name: &'static str,
+    pub prefix: Option<&'static str>,
+}
+
+impl InlineHandlerDef {
+    pub const fn new(name: &'static str, prefix: Option<&'static str>) -> Self {
+        Self { name, prefix }
+    }
+
+    pub fn matches(&self, query: &str) -> bool {
+        match self.prefix {
+            Some(prefix) => query
+                .trim_start()
+                .to_lowercase()
+                .starts_with(&prefix.to_lowercase()),
+            None => true,
+        }
+    }
+}
+
+/// Result of a module inline-query handler.
+pub enum InlineQueryReply {
+    /// This handler does not want the query; continue with other handlers.
+    Skip,
+    /// Answer the query with these results.
+    Results(Vec<Article>),
+    /// The handler already called `InlineQuery::answer` itself.
+    Answered,
 }
 
 /// A named watcher handled by [`Module::on_watcher`].
@@ -544,6 +751,23 @@ pub trait Module: Send + Sync {
         _data: &str,
     ) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Inline-query handlers exposed by this module. The inline bot checks them
+    /// before falling back to the built-in command catalog.
+    fn inline_handlers(&self) -> Vec<InlineHandlerDef> {
+        Vec::new()
+    }
+
+    /// Handle an inline query. Use `ctx.inline.query_gallery()` to answer with
+    /// a gallery, or return [`InlineQueryReply::Results`] with articles.
+    async fn on_inline_query(
+        &self,
+        _ctx: &Arc<Ctx>,
+        _query: &InlineQuery,
+        _text: &str,
+    ) -> Result<InlineQueryReply> {
+        Ok(InlineQueryReply::Skip)
     }
 
     async fn on_load(&self, _ctx: &Arc<Ctx>) -> Result<()> {
@@ -784,6 +1008,392 @@ mod tests {
             ..Default::default()
         };
         assert!(!broken.matches_text("anything"));
+    }
+
+    #[test]
+    fn watcher_func_runs_after_declarative_filters() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let filter = WatcherFilter::default().with_func(|_message: &Msg| true);
+        assert!(filter.has_func());
+        let debug = format!("{filter:?}");
+        assert!(debug.contains("WatcherFunc(..)"), "{debug}");
+
+        // The custom predicate is the last stage, so a failed declarative
+        // filter must short-circuit it.
+        let calls = AtomicUsize::new(0);
+        let predicate = |value: &u32| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            *value == 7
+        };
+        assert!(!combine_func(false, Some(&predicate), &7));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        assert!(combine_func(true, Some(&predicate), &7));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!combine_func(true, Some(&predicate), &8));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Without a predicate the declarative result is authoritative.
+        assert!(combine_func::<u32>(true, None, &0));
+        assert!(!combine_func::<u32>(false, None, &0));
+
+        // Clones share the captured closure state instead of copying it.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&counter);
+        let filter = WatcherFilter::default().with_func(move |_message: &Msg| {
+            captured.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        let clone = filter.clone();
+        let original_func = filter.func.as_ref().expect("func");
+        let cloned_func = clone.func.as_ref().expect("func");
+        assert!(Arc::ptr_eq(&original_func.0, &cloned_func.0));
+
+        let mut replaced = WatcherFilter::default();
+        assert!(!replaced.has_func());
+        replaced.set_func(|_message: &Msg| false);
+        assert!(replaced.has_func());
+    }
+
+    #[test]
+    fn watcher_view_filters_scope_flags_and_ids() {
+        use crate::tg::MediaKind;
+
+        let base = WatcherView {
+            text: "hello",
+            outgoing: false,
+            is_private: true,
+            is_group: false,
+            is_channel: false,
+            media: MediaKind::None,
+            forwarded: false,
+            inline: false,
+            has_reply: false,
+            mentioned: false,
+            sender_id: Some(42),
+            chat_id: 42,
+        };
+        let matches = |filter: &WatcherFilter, view: &WatcherView<'_>| {
+            filter.matches_view(view, &[".".to_owned()], false)
+        };
+
+        assert!(matches(
+            &WatcherFilter {
+                only_pm: true,
+                ..Default::default()
+            },
+            &base
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                no_pm: true,
+                ..Default::default()
+            },
+            &base
+        ));
+
+        let mut group = base;
+        group.is_private = false;
+        group.is_group = true;
+        group.chat_id = -100123;
+        assert!(matches(
+            &WatcherFilter {
+                only_groups: true,
+                ..Default::default()
+            },
+            &group
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                no_groups: true,
+                ..Default::default()
+            },
+            &group
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                only_pm: true,
+                ..Default::default()
+            },
+            &group
+        ));
+
+        let mut channel = group;
+        channel.is_group = false;
+        channel.is_channel = true;
+        assert!(matches(
+            &WatcherFilter {
+                only_channels: true,
+                ..Default::default()
+            },
+            &channel
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                no_channels: true,
+                ..Default::default()
+            },
+            &channel
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                only_groups: true,
+                ..Default::default()
+            },
+            &channel
+        ));
+
+        assert!(!matches(
+            &WatcherFilter {
+                outgoing: Some(true),
+                ..Default::default()
+            },
+            &base
+        ));
+        assert!(matches(
+            &WatcherFilter {
+                outgoing: Some(false),
+                ..Default::default()
+            },
+            &base
+        ));
+
+        let mut flagged = base;
+        flagged.forwarded = true;
+        flagged.inline = true;
+        flagged.has_reply = true;
+        flagged.mentioned = true;
+        assert!(!matches(
+            &WatcherFilter {
+                no_forwards: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+        assert!(matches(
+            &WatcherFilter {
+                only_forwards: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                no_inline: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+        assert!(matches(
+            &WatcherFilter {
+                only_inline: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                no_reply: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+        assert!(matches(
+            &WatcherFilter {
+                only_reply: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                no_mention: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+        assert!(matches(
+            &WatcherFilter {
+                mention: true,
+                ..Default::default()
+            },
+            &flagged
+        ));
+
+        assert!(matches(
+            &WatcherFilter {
+                from_id: Some(42),
+                chat_id: Some(42),
+                ..Default::default()
+            },
+            &base
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                from_id: Some(7),
+                ..Default::default()
+            },
+            &base
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                chat_id: Some(7),
+                ..Default::default()
+            },
+            &base
+        ));
+
+        // Contradictory selectors can never match, but must not panic.
+        assert!(!matches(
+            &WatcherFilter {
+                only_pm: true,
+                no_pm: true,
+                ..Default::default()
+            },
+            &base
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                only_inline: true,
+                no_inline: true,
+                ..Default::default()
+            },
+            &base
+        ));
+    }
+
+    #[test]
+    fn watcher_view_combines_commands_media_and_text() {
+        use crate::tg::MediaKind;
+
+        let view = WatcherView {
+            text: ".test needle!",
+            outgoing: false,
+            is_private: false,
+            is_group: true,
+            is_channel: false,
+            media: MediaKind::None,
+            forwarded: false,
+            inline: false,
+            has_reply: false,
+            mentioned: false,
+            sender_id: Some(42),
+            chat_id: -100123,
+        };
+        let prefixes = [".".to_owned(), "!".to_owned()];
+        let matches = |filter: &WatcherFilter, view: &WatcherView<'_>| {
+            filter.matches_view(view, &prefixes, false)
+        };
+
+        assert!(matches(
+            &WatcherFilter {
+                only_commands: true,
+                only_groups: true,
+                no_media: true,
+                startswith: Some(".test".to_owned()),
+                contains: Some("needle".to_owned()),
+                endswith: Some("!".to_owned()),
+                regex: Some("^\\s*\\.test".to_owned()),
+                ..Default::default()
+            },
+            &view
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                no_commands: true,
+                ..Default::default()
+            },
+            &view
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                only_commands: true,
+                only_media: true,
+                ..Default::default()
+            },
+            &view
+        ));
+
+        let mut photo = view;
+        photo.media = MediaKind::Photo;
+        photo.text = "caption";
+        assert!(matches(
+            &WatcherFilter {
+                only_photos: true,
+                no_commands: true,
+                contains: Some("caption".to_owned()),
+                ..Default::default()
+            },
+            &photo
+        ));
+        assert!(!matches(
+            &WatcherFilter {
+                only_photos: true,
+                only_videos: true,
+                ..Default::default()
+            },
+            &photo
+        ));
+    }
+
+    #[test]
+    fn watcher_view_edits_require_explicit_opt_in() {
+        use crate::tg::MediaKind;
+
+        let view = WatcherView {
+            text: "edited",
+            outgoing: false,
+            is_private: true,
+            is_group: false,
+            is_channel: false,
+            media: MediaKind::None,
+            forwarded: false,
+            inline: false,
+            has_reply: false,
+            mentioned: false,
+            sender_id: Some(42),
+            chat_id: 42,
+        };
+
+        assert!(!WatcherFilter::default().matches_view(&view, &[], true));
+        assert!(!WatcherFilter {
+            editable: Some(false),
+            ..Default::default()
+        }
+        .matches_view(&view, &[], true));
+        assert!(WatcherFilter {
+            editable: Some(true),
+            ..Default::default()
+        }
+        .matches_view(&view, &[], true));
+
+        // New messages are still delivered when edits are enabled.
+        assert!(WatcherFilter::default().matches_view(&view, &[], false));
+        assert!(WatcherFilter {
+            editable: Some(true),
+            ..Default::default()
+        }
+        .matches_view(&view, &[], false));
+    }
+
+    #[test]
+    fn watcher_regex_validation_reports_the_broken_pattern() {
+        assert!(WatcherFilter {
+            regex: Some(r"^[a-z]+$".to_owned()),
+            ..Default::default()
+        }
+        .validate_regex()
+        .is_ok());
+
+        let error = WatcherFilter {
+            regex: Some("([a-z".to_owned()),
+            ..Default::default()
+        }
+        .validate_regex()
+        .expect_err("invalid regex must be rejected");
+        assert!(error.contains("invalid watcher regex"), "{error}");
+        assert!(error.contains("([a-z"), "{error}");
     }
 
     #[test]

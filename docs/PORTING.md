@@ -13,7 +13,7 @@ The short version:
 | `@loader.command` | `commands()` returning `CommandDef` |
 | `@loader.watcher` + `@loader.tag` | `watchers()` returning `WatcherDef` |
 | `@loader.callback_handler` | `has_callback()` + `on_callback()` |
-| `@loader.inline_handler` | not exposed to external modules yet |
+| `@loader.inline_handler` | `inline_handlers()` + `on_inline_query()` |
 | `@loader.raw_handler` | not exposed to external modules yet |
 | `@loader.ratelimit` | `CommandDef::ratelimit()` |
 | `@loader.owner` / `@loader.unrestricted` | `CommandDef::security(OWNER)` / `EVERYONE` |
@@ -191,7 +191,25 @@ Supported filters:
 `no_docs`, `no_stickers`, `only_channels`, `only_groups`, `only_pm`,
 `no_pm`, `no_channels`, `no_groups`, `no_forwards`, `only_forwards`,
 `no_reply`, `only_reply`, `mention`, `no_mention`, `startswith`, `endswith`,
-`contains`, `regex`, `from_id`, `chat_id`.
+`contains`, `regex`, `from_id`, `chat_id`, `only_inline`, `no_inline`.
+
+Python's `filter=` callable maps to `func`:
+
+```rust
+fn watchers(&self) -> Vec<WatcherDef> {
+    vec![WatcherDef::new(
+        "trusted_links",
+        WatcherFilter::default().with_func(|message: &Msg| {
+            message.text().starts_with("https://t.me/")
+                && !message.outgoing()
+        }),
+    )]
+}
+```
+
+The predicate is stored behind an `Arc`, so cloning the filter is cheap, and it
+runs only after every declarative filter matched. Keep it short: it executes on
+the dispatcher hot path.
 
 Notes:
 
@@ -199,8 +217,8 @@ Notes:
   default `editable=False`.
 - `only_docs` and `no_docs` describe the same set: documents, videos and audio
   files (Telegram stores videos and audio as documents).
-- `only_inline` / `no_inline` have no equivalent yet: message watchers never
-  receive inline queries.
+- `only_inline` / `no_inline` match messages with a `via_bot_id`, i.e. sent
+  through a bot in inline mode.
 - The legacy `has_watcher() -> true` + `on_message()` pair still works for one
   unfiltered watcher, but it never sees edits. Prefer `watchers()`.
 - `has_any_watcher()` does not need to be implemented: it is derived from
@@ -250,9 +268,10 @@ fn callback_allowed(&self, _ctx: &Arc<Ctx>, _sender: i64) -> bool {
 }
 ```
 
-Inline handlers (`@loader.inline_handler`) and raw TL handlers
-(`@loader.raw_handler`) are not part of the external-module API yet. Use a core
-module or extend the host if you genuinely need them.
+Inline handlers are available through `Module::inline_handlers()` and
+`Module::on_inline_query()`; see `modules/README.md` for a QueryGallery example.
+Raw TL handlers (`@loader.raw_handler`) are still not part of the API because
+grammers 0.12 does not expose a stable raw-update hook.
 
 ## 5. Configuration
 
@@ -335,6 +354,11 @@ async fn on_error(&self, ctx: &Arc<Ctx>, source: &str, error: &anyhow::Error) {
   lifecycle hooks. It must not panic; its own errors are logged.
 - `api_version()` is informational today: the host warns when a module targets
   a newer API than the running build. Keep the default unless you know why.
+- API history: version 2 added declarative watchers, inline handlers, managed
+  tasks and lifecycle hooks; version 3 added `WatcherFilter::func`
+  (`with_func`/`set_func`). Migrating a 2.x module only requires adding
+  `..Default::default()` when constructing `WatcherFilter` literally, which the
+  examples already do.
 
 ## 7. Libraries and imports
 
@@ -353,7 +377,8 @@ Dynamic import of another external `.rs` file at runtime is not supported.
 - [ ] Every Python command has a `CommandDef` with the same name and aliases.
 - [ ] Command security matches the Python decorators, not a broader mask.
 - [ ] Watchers use `WatcherFilter`; edits are requested explicitly.
-- [ ] Callback payloads are namespaced and `has_callback()` is set.
+- [ ] Callback payloads are namespaced and `has_callback()` or an inline-unit
+      callback handler is set.
 - [ ] Config keys keep their old names so existing databases keep working.
 - [ ] `client_ready` logic moved to `on_load`; cleanup moved to `on_unload`.
 - [ ] Errors use `anyhow::Result`; no `unwrap`/`expect` on user input or network.
@@ -369,5 +394,6 @@ Dynamic import of another external `.rs` file at runtime is not supported.
 - `quote_media` is a link with a preview, not a native quote: grammers 0.12 has
   no `InputMediaWebPage`.
 - `.eval` runs Rhai, not Python, so only Rust/Rhai snippets work.
-- Inline handlers and raw TL handlers are not exposed to external modules yet.
+- Raw TL handlers are not exposed to external modules yet. Inline handlers are
+  exposed, but inline query results are article-based (no native media upload).
 - `.terminal` is a trusted owner tool, not a sandbox.

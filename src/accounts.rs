@@ -10,13 +10,21 @@
 //! just a matter of changing the active entry and restarting the process.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{write_private, Config};
 
 pub const FILE_NAME: &str = "accounts.json";
+
+/// Serializes read-modify-write cycles on `accounts.json`. Web handlers and
+/// inline callbacks run on different tasks, so without this lock two account
+/// additions could load the same snapshot and the last writer would silently
+/// drop the other account.
+static REGISTRY_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
@@ -56,7 +64,9 @@ impl Registry {
                     "accounts registry {} is corrupted ({err}); preserving it and starting empty",
                     path.display()
                 );
-                let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                // Nanoseconds keep two corrupt loads in the same second from
+                // overwriting each other's preserved copy.
+                let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S-%f");
                 let backup = path.with_file_name(format!("{FILE_NAME}.corrupt-{stamp}"));
                 match std::fs::rename(&path, &backup) {
                     Ok(()) => tracing::warn!(
@@ -77,6 +87,24 @@ impl Registry {
         let raw = serde_json::to_string_pretty(self)?;
         write_private(&path, raw.as_bytes())
             .with_context(|| format!("failed to save {}", path.display()))
+    }
+
+    /// Atomically load, modify and save the registry.
+    ///
+    /// Concurrent additions/switches are serialized in-process, and the file
+    /// itself is replaced with `write_private` (fsync + rename), so a crash
+    /// leaves either the old or the new complete registry.
+    pub fn update<F>(data_root: &Path, change: F) -> Result<Self>
+    where
+        F: FnOnce(&mut Registry) -> Result<()>,
+    {
+        let _guard = REGISTRY_LOCK
+            .lock()
+            .map_err(|_| anyhow!("account registry lock is poisoned"))?;
+        let mut registry = Self::load(data_root);
+        change(&mut registry)?;
+        registry.save(data_root)?;
+        Ok(registry)
     }
 
     pub fn get(&self, id: &str) -> Option<&Account> {
@@ -205,11 +233,152 @@ mod tests {
         assert!(registry.accounts.is_empty());
         assert!(!path.exists(), "corrupted registry must be moved aside");
 
-        let preserved = std::fs::read_dir(&root)
+        let preserved: Vec<_> = std::fs::read_dir(&root)
             .expect("read root")
             .filter_map(|entry| entry.ok())
-            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"));
-        assert!(preserved, "corrupted registry must be kept");
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().contains(".corrupt-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(preserved.len(), 1, "corrupted registry must be kept");
+        assert_eq!(
+            std::fs::read_to_string(&preserved[0]).expect("read preserved registry"),
+            "{ broken",
+            "the preserved registry must be an exact copy"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ignores_a_temporary_registry_left_by_a_crash() {
+        let root = temp_root();
+        Registry::update(&root, |registry| {
+            registry.upsert(Account {
+                id: "stable".to_owned(),
+                phone: "+79000000000".to_owned(),
+                name: "Stable".to_owned(),
+                username: None,
+                tg_id: 1,
+            });
+            Ok(())
+        })
+        .expect("save registry");
+
+        let stale = root.join(format!(".{FILE_NAME}.99999.0.tmp"));
+        std::fs::write(&stale, "{ half").expect("write stale temp");
+
+        let registry = Registry::load(&root);
+        assert_eq!(registry.accounts.len(), 1);
+        assert!(registry.get("stable").is_some());
+        let _ = std::fs::remove_file(stale);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_updates_keep_every_account() {
+        let root = temp_root();
+        let mut threads = Vec::new();
+        for index in 0..8 {
+            let root = root.clone();
+            threads.push(std::thread::spawn(move || {
+                Registry::update(&root, |registry| {
+                    registry.upsert(Account {
+                        id: format!("acc{index}"),
+                        phone: format!("+7900000000{index}"),
+                        name: format!("Account {index}"),
+                        username: None,
+                        tg_id: index,
+                    });
+                    Ok(())
+                })
+                .expect("update registry");
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("join writer");
+        }
+
+        let registry = Registry::load(&root);
+        assert_eq!(registry.accounts.len(), 8);
+        for index in 0..8 {
+            assert!(
+                registry.get(&format!("acc{index}")).is_some(),
+                "account acc{index} was lost"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failed_update_leaves_the_registry_untouched() {
+        let root = temp_root();
+        Registry::update(&root, |registry| {
+            registry.upsert(Account {
+                id: "keep".to_owned(),
+                phone: "+79000000000".to_owned(),
+                name: "Keep me".to_owned(),
+                username: None,
+                tg_id: 1,
+            });
+            Ok(())
+        })
+        .expect("seed registry");
+        let before = std::fs::read_to_string(Registry::path(&root)).expect("read registry");
+
+        let err = Registry::update(&root, |registry| {
+            registry.upsert(Account {
+                id: "doomed".to_owned(),
+                phone: String::new(),
+                name: String::new(),
+                username: None,
+                tg_id: 2,
+            });
+            Err(anyhow!("boom"))
+        })
+        .expect_err("update must fail");
+        assert!(err.to_string().contains("boom"));
+
+        let after = std::fs::read_to_string(Registry::path(&root)).expect("read registry");
+        assert_eq!(before, after, "a failed update must not rewrite the file");
+        assert!(Registry::load(&root).get("doomed").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn active_accounts_use_isolated_database_and_session_paths() {
+        let root = temp_root();
+        let id = "79001234567";
+        let dir = account_dir(&root, id);
+        std::fs::create_dir_all(&dir).expect("create account dir");
+        std::fs::write(account_session_path(&root, id), b"session").expect("write session");
+
+        Registry::update(&root, |registry| {
+            registry.upsert(Account {
+                id: id.to_owned(),
+                phone: "+79001234567".to_owned(),
+                name: "Primary".to_owned(),
+                username: None,
+                tg_id: 1,
+            });
+            registry.active = Some(id.to_owned());
+            Ok(())
+        })
+        .expect("save registry");
+
+        let (db, session) = active_paths(&root);
+        assert_eq!(db, account_db_path(&root, id));
+        assert_eq!(session, account_session_path(&root, id));
+        assert_ne!(db, Config::db_path(&root));
+        assert_ne!(session, Config::session_path(&root));
+        assert!(db.starts_with(&root));
+        assert!(session.starts_with(&root));
+
+        // Path traversal in a corrupted/foreign id must stay inside accounts/.
+        let escaped = account_dir(&root, "../../etc/passwd");
+        assert!(escaped.starts_with(root.join("accounts")));
         let _ = std::fs::remove_dir_all(root);
     }
 

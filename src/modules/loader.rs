@@ -634,7 +634,7 @@ impl Module for LoaderRestrictor {
     }
 
     async fn on_load(&self, ctx: &Arc<Ctx>) -> Result<()> {
-        crate::modules::loader_restrictor::on_load(ctx).await
+        crate::modules::loader_restrictor::on_load(ctx, self.name()).await
     }
 
     fn commands(&self) -> Vec<CommandDef> {

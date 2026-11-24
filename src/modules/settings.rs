@@ -528,38 +528,41 @@ impl CoreMod {
         );
 
         // Run lifecycle hooks now, so enabling or disabling a module does not
-        // require a process restart. `loaded_modules` prevents double calls.
+        // require a process restart. `lifecycle` prevents double calls, tracks
+        // failures and rolls back tasks if `on_load` errors.
         let was_loaded = ctx.module_loaded(module.name());
-        if enabled && !was_loaded {
-            match module.on_load(ctx).await {
-                Ok(()) => ctx.mark_module_loaded(module.name()),
-                Err(err) => {
-                    tracing::error!("Failed to load module {}: {err:#}", module.name());
-                    module
-                        .on_error(ctx, &format!("on_load {}", module.name()), &err)
-                        .await;
+        let mut load_error = None;
+        if enabled {
+            if !was_loaded {
+                if let Err(err) = crate::lifecycle::load(ctx, &module).await {
+                    load_error = Some(format!("{err:#}"));
                 }
             }
-        } else if !enabled && was_loaded {
-            if let Err(err) = module.on_unload(ctx).await {
-                tracing::error!("Failed to unload module {}: {err:#}", module.name());
-                module
-                    .on_error(ctx, &format!("on_unload {}", module.name()), &err)
-                    .await;
-            }
+        } else if was_loaded {
+            crate::lifecycle::unload(ctx, &module).await;
+        } else {
+            // Disabling a module that failed to load (or never loaded) should
+            // still clear its runtime state and any leftover tasks.
+            ctx.abort_module_tasks(module.name());
             ctx.mark_module_unloaded(module.name());
         }
 
-        message
-            .reply_html(ctx.tf(
-                if enabled {
-                    "settings.toggled_on"
-                } else {
-                    "settings.toggled_off"
-                },
-                &[&escape_html(module.name())],
-            ))
-            .await?;
+        let mut response = ctx.tf(
+            if enabled {
+                "settings.toggled_on"
+            } else {
+                "settings.toggled_off"
+            },
+            &[&escape_html(module.name())],
+        );
+        if let Some(err) = load_error {
+            response.push_str(&format!(
+                "\n\n⚠️ {}: <code>{}</code>",
+                ctx.tr("errors.error"),
+                escape_html(&err)
+            ));
+        }
+        message.reply_html(response).await?;
         Ok(())
     }
 

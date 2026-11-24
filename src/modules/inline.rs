@@ -248,6 +248,7 @@ impl InlineStuff {
         ctx.db
             .set(INLINE_NS, "custom_bot", Value::String(raw.clone()));
         ctx.db.remove(INLINE_NS, "bot_token");
+        ctx.inline.unload_all_units(ctx).await;
         ctx.inline.stop().await;
         message
             .reply_html(ctx.tf("inline.bot_updated", &[&escape_html(&raw)]))

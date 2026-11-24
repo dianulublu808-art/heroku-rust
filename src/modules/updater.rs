@@ -72,19 +72,19 @@ impl Module for UpdaterMod {
     }
 
     async fn on_load(&self, ctx: &Arc<Ctx>) -> Result<()> {
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
+        let task_ctx = ctx.clone();
+        ctx.spawn_module_task(self.name(), async move {
             let mut ticker = tokio::time::interval(FETCH_INTERVAL);
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                let autoupdate = ctx.db.get_bool("UpdaterMod", "autoupdate", false);
+                let autoupdate = task_ctx.db.get_bool("UpdaterMod", "autoupdate", false);
                 let Some(root) = repo_root() else {
                     continue;
                 };
                 match update_status(&root).await {
                     Ok(status) if status.behind > 0 => {
-                        let last = ctx.db.get_str("UpdaterMod", "last_notified", "");
+                        let last = task_ctx.db.get_str("UpdaterMod", "last_notified", "");
                         if last == status.remote {
                             continue;
                         }
@@ -93,34 +93,36 @@ impl Module for UpdaterMod {
                         // autoupdate is disabled, unless the owner silenced
                         // those notifications.
                         if !autoupdate {
-                            if ctx
+                            if task_ctx
                                 .db
                                 .get_bool("UpdaterMod", "disable_notifications", false)
                             {
                                 continue;
                             }
-                            ctx.db
+                            task_ctx
+                                .db
                                 .set("UpdaterMod", "last_notified", status.remote.clone());
-                            let commits = format_commits(ctx.as_ref(), &status);
-                            let caption = ctx.tf(
+                            let commits = format_commits(task_ctx.as_ref(), &status);
+                            let caption = task_ctx.tf(
                                 "updater.update_required",
                                 &[&status.remote, &status.remote, &commits],
                             );
                             let buttons = vec![vec![
                                 Button::data(
-                                    ctx.tr("updater.btn_update"),
+                                    task_ctx.tr("updater.btn_update"),
                                     b"heroku:upd:apply".to_vec(),
                                 ),
                                 Button::data(
-                                    ctx.tr("updater.btn_ignore"),
+                                    task_ctx.tr("updater.btn_ignore"),
                                     b"heroku:upd:ignore".to_vec(),
                                 ),
                             ]];
-                            let _ = notify_update(ctx.as_ref(), caption, buttons).await;
+                            let _ = notify_update(task_ctx.as_ref(), caption, buttons).await;
                             continue;
                         }
 
-                        ctx.db
+                        task_ctx
+                            .db
                             .set("UpdaterMod", "last_notified", status.remote.clone());
 
                         // Python applies minor updates automatically and only
@@ -139,13 +141,13 @@ impl Module for UpdaterMod {
 
                         if minor_update != Some(true) {
                             let _ = notify_update(
-                                ctx.as_ref(),
-                                ctx.tf(
+                                task_ctx.as_ref(),
+                                task_ctx.tf(
                                     "updater.major_update",
                                     &[&status.behind.to_string(), &status.remote],
                                 ),
                                 vec![vec![Button::data(
-                                    ctx.tr("updater.btn_update"),
+                                    task_ctx.tr("updater.btn_update"),
                                     b"heroku:upd:apply".to_vec(),
                                 )]],
                             )
@@ -153,14 +155,16 @@ impl Module for UpdaterMod {
                             continue;
                         }
 
-                        let _ = ctx
-                            .send_self(ctx.tf("updater.autoupdate_applying", &[&status.remote]))
+                        let _ = task_ctx
+                            .send_self(
+                                task_ctx.tf("updater.autoupdate_applying", &[&status.remote]),
+                            )
                             .await;
 
                         if UPDATING.swap(true, Ordering::SeqCst) {
                             continue;
                         }
-                        let task_ctx = ctx.clone();
+                        let task_ctx = task_ctx.clone();
                         let task_root = root.clone();
                         tokio::spawn(async move {
                             let result = apply_update(&task_ctx, &task_root).await;

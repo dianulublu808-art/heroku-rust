@@ -188,6 +188,16 @@ impl Msg {
         self.inner.forward_header().is_some()
     }
 
+    /// Id of the bot that sent this message via inline mode, if any. Mirrors
+    /// Python's `via_bot_id` watcher filter.
+    pub fn via_bot_id(&self) -> Option<i64> {
+        self.inner.via_bot_id()
+    }
+
+    pub fn is_inline(&self) -> bool {
+        self.via_bot_id().is_some()
+    }
+
     pub fn has_reply(&self) -> bool {
         self.inner.reply_to_message_id().is_some()
     }

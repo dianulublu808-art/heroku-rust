@@ -27,23 +27,23 @@
 | Повреждённый `accounts.json` | ✅ файл сохраняется как `*.corrupt-<ts>`, есть предупреждение | — | — |
 | Вход по коду / 2FA / QR | ✅ `login.rs` | — | — |
 | Инлайн-бот (queries, callbacks, PM) | ✅ `inline.rs` | — | — |
-| Инлайн-формы / galleries / lists | 🟡 есть карточки, пагинация, конфиг, security | нет публичного API `forms`/`gallery` для модулей | P2 |
-| TTL инлайн-сообщений | ❌ | Python удаляет/редактирует юниты по TTL | P2 |
+| Инлайн-формы / galleries / lists | ✅ публичный API `form`/`list`/`gallery`/`query_gallery` | медиа в inline-результатах ограничены статьями | P2 |
+| TTL инлайн-сообщений | ✅ 24 ч, cleaner каждые 5 с, лимит 256 | — | — |
 | Защита от повторных callback | ✅ дедупликация `(sender, query_id)` с TTL 30 с и лимитом 512 | — | — |
 | Inline security | ✅ `security.check`, `callback_allowed`, фильтрация `.help` | — | — |
 | Модульные команды в `.rs` | ✅ `#[path]` + `inventory`, `.loadmod X.rs` | требуется пересборка (автоматическая) | — |
 | Python-модули | ❌ не исполняются принципиально | нужен порт на Rust | — |
 | Module API: commands/aliases | ✅ `CommandDef` | — | — |
-| Module API: watchers | ✅ `watchers()` + `WatcherFilter`, `on_watcher()`, edits | — | — |
+| Module API: watchers | ✅ `watchers()` + `WatcherFilter` (включая `func`), `on_watcher()`, edits | — | — |
 | Module API: callbacks | ✅ `has_callback` + `on_callback` + `callback_allowed` | — | — |
-| Module API: inline handlers | ❌ | инлайн-бот централизован | P2 |
+| Module API: inline handlers | ✅ `inline_handlers` + `on_inline_query` | нет live-проверки | 🟡 |
 | Module API: raw TL handlers | ❌ | | P3 |
 | Lifecycle `on_load`/`on_unload` | ✅ | `on_error`, учёт выключенных модулей | — |
 | Включение/выключение без рестарта | ✅ `.togglemod` вызывает `on_load`/`on_unload` | — | — |
 | Зависимости модулей | ✅ `dependencies()`, топологическая загрузка | — | — |
 | Версионирование Module API | ✅ `MODULE_API_VERSION`, предупреждение при несовместимости | — | — |
 | Изоляция ошибок модулей | ✅ единый `on_error` для команд, watcher-ов, callback-ов и lifecycle | — | — |
-| Watcher-фильтры (30+) | ✅ `WatcherFilter`, включая `no_*` для медиа | `only_inline`/`no_inline` пока нет | 🟡 |
+| Watcher-фильтры (30+) | ✅ `WatcherFilter`, включая `no_*` для медиа, `only_inline`/`no_inline`, `func` | — | — |
 | Rate limiting команд | ✅ `ratelimit` + API protection | — | — |
 | Flood/anti-spam API | ✅ `protection.rs` | — | — |
 | Security bitmasks | ✅ совместимы с Heroku | — | — |
@@ -58,7 +58,7 @@
 | `.logs` по модулям | ✅ включая внешние `heroku::ext_*` | — | — |
 | Ограничение параллельных handler-ов | ✅ не более 64 задач, дренаж при завершении | — | — |
 | Корректное завершение | ✅ дренаж 10 с, затем abort, затем `on_unload` | — | — |
-| Тесты | ✅ 58 unit-тестов | нет integration/mock Telegram тестов | P2 |
+| Тесты | ✅ 84 unit-теста | нет integration/mock Telegram тестов | P2 |
 | `install.sh` Termux/Ubuntu/Arch/Alpine | ✅ rustup 1.85+, повторный запуск | нужен прогон на Arch/Alpine | P2 |
 
 ## 2. Критические выводы аудита
@@ -104,21 +104,41 @@
 
 - [x] `MODULE_API_VERSION` и проверка совместимости при загрузке.
 - [x] `dependencies()` и топологический порядок `on_load`/`on_unload`.
-- [x] `watchers()` + `WatcherFilter` (все фильтры Python, кроме inline).
+- [x] `watchers()` + `WatcherFilter` (фильтры Python; `func` добавлен в API 3.0).
 - [x] `on_watcher()` с поддержкой edits.
 - [x] Загрузка/выгрузка модуля при `.togglemod` без рестарта.
 - [x] Изоляция ошибок: `on_error` не может уронить диспетчер.
 - [x] Тесты циклических и самозависимостей, отсутствующих зависимостей.
 - [x] Документация портирования: [`docs/PORTING.md`](docs/PORTING.md).
 
-### Этап 3 — Inline Manager 2.0
+### Этап 2.1 — Module API 3.0 (готово)
 
-- [ ] Публичный API форм, галерей, списков и пагинации для модулей.
-- [ ] TTL и очистка инлайн-юнитов.
+- [x] `MODULE_API_VERSION = 3`; предупреждение при загрузке модуля с версией
+  новее хоста сохранено.
+- [x] `WatcherFilter::func` (`with_func`/`set_func`) — Rust-аналог Python
+  `filter=`.
+- [x] `func` вызывается строго после декларативных фильтров и не выполняется,
+  если хотя бы один из них не совпал.
+- [x] `WatcherFunc` разделяется через `Arc`; клонирование фильтра не копирует
+  захваченное состояние.
+- [x] Тесты композиции/короткого замыкания, `Debug`, `set_func`.
+- [x] Миграция 2 → 3 описана в `docs/PORTING.md` и `modules/README.md`.
+
+### Этап 3 — Inline Manager 2.0 (основное готово)
+
+- [x] Публичный API форм, галерей, списков и пагинации для модулей
+  (`ctx.inline.form/list/gallery/query_gallery`).
+- [x] TTL и очистка инлайн-юнитов (24 ч, cleaner каждые 5 с, лимит 256 юнитов).
 - [x] Дедупликация callback-ов (TTL 30 с, лимит 512).
-- [ ] Inline handlers модулей.
-- [ ] Единая проверка прав и владельца юнита.
-- [ ] Тесты конкурентного доступа к юнитам.
+- [x] Inline handlers модулей (`Module::inline_handlers`/`on_inline_query`).
+- [x] Единая проверка прав и владельца юнита (`force_me`, `always_allow`,
+  `disable_security`, owner/sudo).
+- [x] Тесты конкурентного доступа к реестру юнитов и page-update.
+- [x] `InlineSend` привязывает выбранный query-gallery результат к unit.
+- [ ] Нативные медиа-результаты inline (photo/document/animation) — нужна
+  загрузка файлов; сейчас медиа доступны в сообщениях бота.
+- [ ] Live-тесты Telegram API и fault-injection.
+- [ ] Полный отчёт о паритете: [`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
 
 ### Этап 4 — производительность и мультиаккаунт
 

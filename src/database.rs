@@ -518,6 +518,106 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_a_truncated_write_left_by_a_crash() {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-db-truncated-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let partial = r#"{"heroku.meta":{"schema":1},"heroku.main":{"prefix":"#;
+        std::fs::write(&path, partial).expect("write fixture");
+
+        let db = Database::open(&path).expect("open database");
+        assert_eq!(db.get_str("heroku.main", "prefix", "."), ".");
+        assert_eq!(db.get_i64(META_OWNER, SCHEMA_KEY, 0), SCHEMA_VERSION as i64);
+        assert!(db.set("heroku.main", "prefix", "!"));
+        assert!(db.save());
+
+        let prefix = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .to_owned();
+        let preserved: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(&format!("{prefix}.corrupt-")))
+            .collect();
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(std::env::temp_dir().join(&preserved[0]))
+                .expect("read preserved"),
+            partial,
+            "the partial file must be preserved byte-for-byte"
+        );
+        for name in preserved {
+            let _ = std::fs::remove_file(std::env::temp_dir().join(name));
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ignores_temporary_files_left_by_a_crashed_save() {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-db-tmp-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let db = Database::open(&path).expect("open database");
+        assert!(db.set("heroku.main", "prefix", "!"));
+        assert!(db.save());
+        drop(db);
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name");
+        let stale_tmp = path.with_file_name(format!(".{name}.99999.0.tmp"));
+        std::fs::write(&stale_tmp, "half-written").expect("write stale temp");
+
+        let reopened = Database::open(&path).expect("reopen database");
+        assert_eq!(reopened.get_str("heroku.main", "prefix", "."), "!");
+        // The complete database is still valid JSON; the stale temp is ignored.
+        assert!(serde_json::from_str::<Value>(
+            &std::fs::read_to_string(&path).expect("read database")
+        )
+        .is_ok());
+
+        let _ = std::fs::remove_file(stale_tmp);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn atomic_save_leaves_no_temporary_files() {
+        let path = std::env::temp_dir().join(format!(
+            "heroku-db-atomic-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let db = Database::open(&path).expect("open database");
+        for index in 0..5 {
+            assert!(db.set("heroku.main", "counter", index));
+            assert!(db.save());
+        }
+        assert!(db.save());
+
+        let prefix = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .to_owned();
+        let leftover = std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(&format!(".{prefix}.")) && name.ends_with(".tmp"))
+            .count();
+        assert_eq!(leftover, 0, "successful saves must remove their temp file");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn preserves_a_corrupted_database() {
         let path = std::env::temp_dir().join(format!(
             "heroku-corrupt-{}-{}.json",

@@ -523,6 +523,8 @@ inline:
   prefix_reset: "✅ Präfix auf <code>.</code> zurückgesetzt"
   menu_closed: "😌 <b>Menü geschlossen.</b>"
   callback_forbidden: "🚫 Diese Aktion ist nur für den Eigentümer."
+  unit_expired: "⌛ Dieses Inline-Formular ist abgelaufen."
+  callback_error: "⚠️ Inline-Aktion fehlgeschlagen. Details im Log."
   expected_text: "✍️ <b>Eine Textantwort wird erwartet.</b>\nSenden Sie den angeforderten Wert als reguläre Nachricht."
 
 accounts:
