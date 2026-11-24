@@ -3,7 +3,7 @@
 Документ составлен по исходному коду обоих проектов, а не по README/ROADMAP.
 Проверка Rust-части: `cargo fmt --all -- --check`, `cargo check --all-targets`,
 `cargo clippy --all-targets --all-features -- -D warnings`,
-`cargo test --all-targets` (85 тестов на момент составления).
+`cargo test --all-targets` (88 тестов на момент составления).
 
 Статусы:
 
@@ -172,7 +172,7 @@
 
 | Возможность | Rust | Статус | Недостающая работа |
 | --- | --- | --- | --- |
-| Unit-тесты | 85 тестов | COMPLETE | — |
+| Unit-тесты | 88 тестов | COMPLETE | — |
 | Тесты БД/миграций/повреждений | есть | COMPLETE | — |
 | Тесты multi-account | есть | COMPLETE | — |
 | Тесты watcher-фильтров | есть, включая короткое замыкание `func` | PARTIAL | Нет тестов на реальных `Msg`/inline-via-bot (требуется mock-транспорт) |
